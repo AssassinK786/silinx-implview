@@ -1,0 +1,34 @@
+FASM skyline (skyline/ of silinx-implview)
+
+This folder vendors the "FASM skyline" widget of Trinity S3AI (t27.ai):
+  page:    https://t27.ai/widgets/fasm-skyline/
+  source:  https://github.com/Trinity-S-AI-DNA/trinity (apps/website/public/widgets/fasm-skyline/,
+           apps/website/public/widgets/widget.css, apps/website/specs/widgets/fasm-skyline.t27)
+  commit:  7df7acba0016651dfabf5eb12adc0b8519727756 (2026-10-05), the last commit touching tool.js and skyline.js;
+           the files fetched from t27.ai on 2026-11-17 are identical to that commit's (sha256 below).
+  licence: tool.js, skyline.js and fasm-skyline.t27 carry "SPDX-License-Identifier: Apache-2.0" and are used under
+           the Apache License 2.0 (LICENSE in this folder). The repository's top-level LICENSE is MIT
+           ("Copyright (c) 2024 Dmitrii Vasilev"); the other files below (HTML, CSS, JSON, SVG) carry no header and
+           are used under the same terms, with this notice.
+
+Files as fetched (sha256), under widgets/ as upstream's public/widgets/:
+  1682c9a1c84f8e74691a641d21f2ff1a2f1ec7bcd5bafe5a9d9f66899840fc7c  widgets/fasm-skyline/fasm-skyline.t27
+  c7f499144a80a80b7185e24ec13c0313dfbb423124ffad1deb92ded09939f982  widgets/fasm-skyline/grid.json
+  d1d23831101ceec2ace11cef9030c77922108fe97da00591edb8a2268ddf62b2  widgets/fasm-skyline/index.html
+  910f0258fe121b4db814885a6ae4a761d22f1f7f50b40efe762a592a14e1e641  widgets/fasm-skyline/samples.json
+  ba66f93feda0a2cce2d36d1a410311dc4cada075bbab9313fa23a07f6165d6fd  widgets/fasm-skyline/skyline.js
+  ca1d05fd8fc388c2c98a68928e5587d84bd7785ec81ef7353a31e33abba944c5  widgets/fasm-skyline/tool.css
+  7d8cb1a77808a9b80478ac5628e12d5e9a236d2b0cadc16fc7ee0153528f7ae7  widgets/fasm-skyline/tool.js (modified, see below)
+  24efc7c4442cdb48f62a1508632c85e6f9b8148edb8de61d470bf327b1fc40ba  widgets/widget.css
+  acd7d9f0477822deeea5b5105398e6426c735dfd4375e6af03f0099154969f89  favicon.svg
+
+Modifications (Apache-2.0 section 4(b)):
+  widgets/fasm-skyline/tool.js, 2026-11-17: when window.T27_WIDGET.K_DATA_INLINE is set, the grid and the samples are
+  taken from it instead of fetched, and tool.css is not linked (the page carries it). Nothing else changed: the
+  drawing, colours, camera, controls, texts and the PNG / STL export are upstream's.
+
+Added by silinx-implview (Apache-2.0 too): build-grid.py (grid.json for any 7-series part from prjxray-db, the format of
+upstream's scripts/widget-data/fasm-skyline.mjs; byte-identical to upstream's grid.json for xc7a200t), make-page.mjs
+(self-contained offline page from a FASM and a grid), boot.mjs (the page as Silinx serves it), selftest.mjs.
+
+"Trinity S3AI" and "t27.ai" are names of their owners; the exported PNG keeps upstream's brand line and URL as credit.

@@ -1,4 +1,4 @@
-# Silinx 7-series guide: implview viewer, openXC7 flow, Cross-Check
+# Silinx 7-series guide: implview viewer, openXC7 flow, Cross-Check, 3D Skyline
 
 Branch `implview-openxc7` of `~/ext/silinx/repo`, based on pmnmalo/Silinx `main` at 5ee9ec0.
 Patches: `patches/Silinx/` (applied by `scripts/setup.sh`).
@@ -14,6 +14,7 @@ because the Vivado 2025.2.1 install here has only 7-series parts.
 | Open 7-series flow (openXC7): Yosys `synth_xilinx`, nextpnr-xilinx, fasm2frames, xc7frames2bit | Design Properties ▸ Synthesis Tool ▸ "openXC7 (Yosys + nextpnr-xilinx; no Vivado needed)" | `set_design_properties synth_tool=openxc7`, then `run_process` |
 | View Implemented Design of an openXC7 build | the same process | `fpga_view` |
 | Cross-Check Implementation against Bitstream | Place & Route ▸ Cross-Check… (Vivado and openXC7 projects only) | `cross_check` |
+| 3D Skyline (FASM): the build's FASM per tile, drawn on the die ([SKYLINE.md](SKYLINE.md)) | Place & Route ▸ 3D Skyline (FASM) (Vivado and openXC7 projects; opens a tab) | `fpga_skyline` |
 
 ## Setup (`~/.silinx/config.json`)
 

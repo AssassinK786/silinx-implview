@@ -6,11 +6,12 @@ cd "$(dirname "$0")/.."
 git submodule update --init --recursive
 for sub in fpga-design-implview Silinx; do
   [ -d "patches/$sub" ] || continue
-  for p in patches/$sub/*.patch; do
-    [ -e "$p" ] || continue
-    if git -C "$sub" apply --reverse --check "../$p" 2>/dev/null; then echo "already applied: $p"
-    else git -C "$sub" apply "../$p" && echo "applied: $p"; fi
-  done
+  set -- patches/$sub/*.patch
+  [ -e "$1" ] || continue
+  # (a series: applied when its last patch is; else every patch in order, on the pinned commit)
+  last="${@: -1}"
+  if git -C "$sub" apply --reverse --check "../$last" 2>/dev/null; then echo "already applied: patches/$sub ($# patches)"; continue; fi
+  for p in "$@"; do git -C "$sub" apply "../$p" && echo "applied: $p"; done
 done
 (cd Silinx && npm ci --omit=dev --ignore-scripts)
 python3 -m venv .venv

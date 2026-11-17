@@ -8,6 +8,7 @@ with open-source cross-verification of the bitstream (openXC7: Yosys, nextpnr-xi
 |---|---|---|
 | `Silinx/` → [pmnmalo/Silinx](https://github.com/pmnmalo/Silinx) | Project Navigator-style IDE: HDL editor, schematics, simulation, board emulator, ISE / Vivado / open flows | AGPL-3.0-only |
 | `fpga-design-implview/` → [rardino/fpga-design-implview](https://github.com/rardino/fpga-design-implview) | Device view of a routed Vivado checkpoint | MIT |
+| `skyline/` (vendored, not a submodule) → [t27.ai FASM skyline](https://t27.ai/widgets/fasm-skyline/) (Trinity-S-AI-DNA/trinity @7df7acb) | 3D skyline of a FASM on the die; see [skyline/NOTICE](skyline/NOTICE) | Apache-2.0 |
 
 This repository's own additions are kept as patches in `patches/<submodule>/`, applied on top of the pinned upstream
 commits by `scripts/setup.sh`:
@@ -17,9 +18,14 @@ commits by `scripts/setup.sh`:
   `import-nextpnr` for the open flow (MIT, as the upstream project).
 - `patches/Silinx/`: Vivado backend for *View Implemented Design (FPGA)* (through `implview`), an **openXC7** synthesis
   tool for 7-series parts (Yosys → nextpnr-xilinx → prjxray → `.bit`), and a **Cross-Check** process and MCP tool
-  (AGPL-3.0-only, as Silinx). See [docs/SILINX_7SERIES_GUIDE.md](docs/SILINX_7SERIES_GUIDE.md).
+  (AGPL-3.0-only, as Silinx), and a **3D Skyline (FASM)** process and MCP tool `fpga_skyline` that open the skyline
+  below for the current build. See [docs/SILINX_7SERIES_GUIDE.md](docs/SILINX_7SERIES_GUIDE.md).
+- `skyline/`: t27.ai's FASM skyline widget, unchanged but for its data loading, for any 7-series part: every tile a
+  FASM configures becomes a column as tall as the features it sets. `scripts/skyline.sh` makes an offline HTML page from
+  a nextpnr FASM or a bit2fasm-decoded Vivado bitstream. See [docs/SKYLINE.md](docs/SKYLINE.md).
 
-Each submodule and its patches keep that project's license; the scripts and docs of this repository are MIT.
+Each submodule and its patches keep that project's license; `skyline/` is Apache-2.0 (LICENSE and NOTICE there); the
+scripts and docs of this repository are MIT.
 
 ## Get it
 

@@ -1,0 +1,572 @@
+From be1bf093910cd0adb5295621572ebd21902e2629 Mon Sep 17 00:00:00 2001
+From: AssassinK786 <85348050+AssassinK786@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 12:04:19 +0530
+Subject: [PATCH 2/2] 7-series: 3D Skyline, a build's FASM drawn on its die
+ (the FASM skyline widget of the umbrella checkout)
+
+- 3D Skyline (process under Place & Route, POST/GET /projects/:p/skyline, MCP fpga_skyline; server/skyline.js, web/js/skyline.js): the open build's nextpnr FASM, or Vivado's bitstream decoded by bit2fasm (Cross-Check's FASM when as new as the routed design); never a FASM older than the build.
+- The die's grid from Project X-Ray's tilegrid.json and the page made by the widget's own scripts (paths.skyline, else <silinx>/../skyline, served as /vendor/skyline/); the interface's page loads them from there, its constants in a JSON element (the pages' Content-Security-Policy runs no inline script); build/skyline.html offline.
+- fpga_skyline: the page's counts (features, tiles, tallest tile, families, tallest columns); Portuguese label; tests (skyline, the tool lists, the routes); changelog fragment (its issue number a placeholder, 9000).
+---
+ changes/9000-implview-openxc7.md | 10 ++++
+ server/impl-routes.js            | 26 +++++++++
+ server/mcp-implview.js           | 28 ++++++++-
+ server/server.js                 |  7 +++
+ server/skyline.js                | 98 ++++++++++++++++++++++++++++++++
+ test/mcp-modules.test.js         |  2 +-
+ test/mcp.test.js                 |  2 +-
+ test/skyline.test.js             | 60 +++++++++++++++++++
+ test/tool-descriptors.test.js    |  9 ++-
+ test/xise-routes.test.js         |  2 +-
+ web/js/api.js                    |  2 +
+ web/js/i18n-fpga.js              |  2 +
+ web/js/processes.js              |  2 +
+ web/js/skyline.js                | 34 +++++++++++
+ web/js/tool-descriptors.js       | 15 +++--
+ 15 files changed, 286 insertions(+), 13 deletions(-)
+ create mode 100644 server/skyline.js
+ create mode 100644 test/skyline.test.js
+ create mode 100644 web/js/skyline.js
+
+diff --git a/changes/9000-implview-openxc7.md b/changes/9000-implview-openxc7.md
+index 7124e0e..8fc0c54 100644
+--- a/changes/9000-implview-openxc7.md
++++ b/changes/9000-implview-openxc7.md
+@@ -8,6 +8,9 @@ In short:
+   Target Device with openFPGALoader.
+ - **Cross-Check Implementation against Bitstream:** a 7-series build checked against its own bitstream decoded by
+   Project X-Ray's bit2fasm; Vivado's build against the open flow's when there are both.
++- **3D Skyline (FASM):** a 7-series build's FASM drawn on its die, each tile a column as tall as the features it sets,
++  by the FASM skyline widget (t27.ai, Apache-2.0) of the umbrella checkout; its page in a tab of its own and offline in
++  build/skyline.html.
+ 
+ In detail:
+ 
+@@ -27,3 +30,10 @@ In detail:
+   bit with nextpnr's FASM (the features of no configuration bit explained by the database) and encoded again against
+   its frames; both builds side by side; UltraScale+ and Versal not cross-checkable (Vivado's own checks only). The MCP
+   server's fpga_view gives the view's model (the utilisation and modules, a site, a net).
++- **3D Skyline (#9000):** the process under Place & Route and the MCP server's fpga_skyline (server/skyline.js): the open
++  build's nextpnr FASM, or Vivado's bitstream decoded by bit2fasm (Cross-Check's FASM when it is as new as the routed
++  design), never a FASM older than the build; the die's grid from Project X-Ray's tilegrid.json and the page made by the
++  widget's own scripts (paths.skyline of config.json, else the umbrella checkout's skyline/, served as /vendor/skyline/
++  for the page the interface opens, its constants in a JSON element: the pages' Content-Security-Policy runs no inline
++  script); fpga_skyline gives the page's counts (the features and tiles, the tallest tile, the families, the tallest
++  columns).
+diff --git a/server/impl-routes.js b/server/impl-routes.js
+index e9c0c08..a655544 100644
+--- a/server/impl-routes.js
++++ b/server/impl-routes.js
+@@ -188,6 +188,25 @@ export async function startCrossCheck(name) {
+   return job;
+ }
+ 
++/** Start a 3D Skyline of a project's 7-series build (POST /projects/:p/skyline; the MCP server's fpga_skyline). */
++export async function startSkyline(name) {
++  const P = Projects;
++  const bad = (msg, status = 400) => new P.HttpError(status, msg);
++  const project = await P.readProject(name);
++  if (!topOf(project)) throw bad('set the top module of the project before drawing its 3D Skyline');
++  if (!isVivadoDevice(project.device)) throw bad(`the 3D Skyline is for the 7-series builds (AMD Vivado, the open 7-series flow), not the ${String(project.device?.part || '').toUpperCase()}`);
++  if (!isTrusted(project)) throw bad(untrustedMessage(name, '3D Skyline', project), 403);
++  const key = name.toLowerCase();
++  const running = implJobs.get(key);
++  if (running && getJob(running)?.status === 'running') throw bad(`an implementation of '${name}' is running (job ${running}); wait for it`, 409);
++  const { skylineProject, skylineFasm } = await import('./skyline.js');
++  const f = skylineFasm(path.join(P.projectDir(name), 'build'), project.top, project.synthTool);
++  if (!f.file) throw bad(f.reason);
++  const job = createJob('skyline', j => skylineProject(j, { project, projectDir: P.projectDir(name) }), { meta: { project: name } });
++  implJobs.set(key, job.id);
++  return job;
++}
++
+ // the logic analyzer's capture (#3176) is inserted by the Silinx toolchain only: its wrapper reads the probes through
+ // hierarchical names, which XST and Vivado's synthesis do not take
+ export const CAPTURE_LEFT_OUT = tool => `WARNING:Silinx - the logic analyzer's capture is inserted by the Silinx toolchain only: ${tool} implements the design without it.`;
+@@ -303,6 +322,13 @@ export function registerImplRoutes(api, { wrap, projects: P }) {
+ 
+   // Cross-Check (server/crosscheck.js, #crosscheck): a job, its lines the run's, its result the report
+   api.post('/projects/:p/crosscheck', wrap(async req => ({ job: (await startCrossCheck(req.params.p)).id })));
++  // 3D Skyline (server/skyline.js, #skyline): a job; its page, made for the interface (its scripts the server's /vendor/skyline/)
++  api.post('/projects/:p/skyline', wrap(async req => ({ job: (await startSkyline(req.params.p)).id })));
++  api.get('/projects/:p/skyline', wrap(async req => {
++    const { skylineAppPage } = await import('./skyline.js');
++    const html = await skylineAppPage(path.join(P.projectDir(req.params.p), 'build'));
++    return html ? { available: true, html } : { available: false, reason: 'no 3D Skyline yet: run it first' };
++  }));
+ 
+   api.get('/projects/:p/bitinfo', wrap(async req => {
+     const project = await P.readProject(req.params.p);
+diff --git a/server/mcp-implview.js b/server/mcp-implview.js
+index 8dd1c9f..509fee3 100644
+--- a/server/mcp-implview.js
++++ b/server/mcp-implview.js
+@@ -1,7 +1,8 @@
+ // The MCP server's tools of a 7-series build's implemented design (#implview, #crosscheck; server/mcp.js, #2674), as
+ // the interface's View Implemented Design (FPGA) and Cross-Check: fpga_view, the model of the view (its utilisation and
+ // modules, a site's cells and pins, a net's ends and route), made from AMD Vivado's or the open flow's build by
+-// implview (server/implview.js); cross_check, the build against its bitstream (server/crosscheck.js).
++// implview (server/implview.js); cross_check, the build against its bitstream (server/crosscheck.js); fpga_skyline, the
++// build's FASM per tile, drawn as the 3D Skyline (server/skyline.js).
+ import path from 'node:path';
+ import * as P from './projects.js';
+ import { toolError, readProject, clip, PROJECT } from './mcp-util.js';
+@@ -76,4 +77,29 @@ export const IMPLVIEW_TOOLS = [
+       return { text: r.text, data: { project: name, part: r.part, family: r.family, checkable: r.checkable, vivado: r.vivado || null, openxc7: r.openxc7 || null, comparison: r.comparison || null } };
+     },
+   },
++  {
++    name: 'fpga_skyline', title: '3D Skyline of a 7-series build\'s FASM',
++    description: '3D Skyline, as the process of the interface: the build\'s FASM (the open 7-series flow\'s nextpnr FASM; AMD Vivado\'s bitstream decoded by Project X-Ray\'s bit2fasm) counted per tile by the FASM skyline widget (t27.ai, the umbrella checkout\'s skyline/) and drawn on the die, each tile a column as tall as the FASM features it sets. Returns the counts the page shows: the features and tiles, the tallest tile, the share of the die\'s tiles with configuration bits, the families (CLB, INT, BRAM, DSP, IO, CLK, OTHER), and the tallest columns (tiles: how many, default 20). The page is build/skyline.html (offline, self-contained).',
++    inputSchema: { type: 'object', properties: { project: PROJECT, tiles: { type: 'integer', description: 'How many of the tallest columns to list (default 20, at most 5000).' }, timeout_s: { type: 'integer', description: 'How long to wait, in seconds (default 600).' } }, required: ['project'], additionalProperties: false },
++    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
++    async run({ project: name, tiles = 20, timeout_s: timeoutS = 600 }) {
++      if (!Number.isInteger(tiles) || tiles < 0 || tiles > 5000) throw toolError('tiles: from 0 to 5000');
++      if (!Number.isInteger(timeoutS) || timeoutS < 1 || timeoutS > 7200) throw toolError('timeout_s: from 1 to 7200 s');
++      await readProject(name);
++      const { startSkyline } = await import('./impl-routes.js');
++      let job;
++      try { job = await startSkyline(name); } catch (e) { throw toolError(e.message); }
++      await wait(job, timeoutS, '3D Skyline');
++      return { ...skylineResult(name, job.result, tiles), untrusted: 'the design\'s file names' };
++    },
++  },
+ ];
++
++/** The fpga_skyline tool's answer from make-page.mjs's counts: its first sample's, its tallest `n` columns. */
++export function skylineResult(name, r, n = 20) {
++  const s = r.samples[0];
++  const data = { project: name, part: r.part, die: r.die, grid: { w: r.grid.w, h: r.grid.h, configTiles: r.grid.configTiles }, page: 'build/skyline.html',
++    fasm: s.fasm, flow: s.flow, features: s.features, tiles: s.tiles, share_pct: s.share, tallest: s.tallest, cleared: s.cleared, off_grid: s.off.length, families: s.families,
++    columns: [...s.columns].sort((a, b) => b.features - a.features || (a.tile < b.tile ? -1 : 1)).slice(0, n).map(({ tile, type, family, features }) => ({ tile, type, family, features })) };
++  return { text: clip(JSON.stringify(data, null, 2)), data };
++}
+diff --git a/server/server.js b/server/server.js
+index c3ff31e..b3d74e0 100644
+--- a/server/server.js
++++ b/server/server.js
+@@ -181,6 +181,13 @@ export async function createApp({ host = '127.0.0.1', token = null, codes = crea
+   app.use('/vendor/nextpnr-ice40', asset(path.join(ROOT, 'node_modules/@yowasp/nextpnr-ice40')));
+   app.use('/vendor/nextpnr-ecp5', asset(path.join(ROOT, 'node_modules/@yowasp/nextpnr-ecp5')));   // (the ECP5's, #2302)
+   app.use('/vendor/nextpnr-himbaechel-gowin', asset(path.join(ROOT, 'node_modules/@yowasp/nextpnr-himbaechel-gowin')));   // (the Gowin's, #2303)
++  // the FASM skyline widget of the umbrella checkout (#skyline, server/skyline.js): its scripts, which the 3D Skyline's page loads
++  {
++    const { skylineDir } = await import('./skyline.js');
++    const { loadConfig } = await import('./toolchain.js');
++    const sky = skylineDir(await loadConfig().catch(() => ({})));
++    if (sky.found) app.use('/vendor/skyline', asset(sky.dir));
++  }
+ 
+   const api = express.Router();
+   // the token for a one-time code of a launcher's address (#2955); a code for the address a second launch opens
+diff --git a/server/skyline.js b/server/skyline.js
+new file mode 100644
+index 0000000..b56ec24
+--- /dev/null
++++ b/server/skyline.js
+@@ -0,0 +1,98 @@
++// 3D Skyline (#skyline; the process and the MCP server's fpga_skyline): a 7-series build's FASM drawn as a skyline on
++// its die, each tile a column as tall as the FASM features it sets, by the FASM skyline widget (t27.ai, Apache-2.0, run
++// as a program of its own: never part of Silinx) of the umbrella checkout (silinx-implview's skyline/).
++//   - the FASM: the open 7-series flow's nextpnr FASM (build/openxc7/routed.fasm); AMD Vivado's bitstream decoded by
++//     Project X-Ray's bit2fasm (Cross-Check's build/implview/crosscheck/design.fasm, else bit2fasm of build/<top>.bit),
++//     never one older than the build;
++//   - the die: skyline/build-grid.py of Project X-Ray's tilegrid.json (build/skyline/grid.json);
++//   - the page: skyline/make-page.mjs, build/skyline.html (self-contained, offline) and build/skyline/app.html (the
++//     interface's: its scripts from /vendor/skyline/, since the pages' Content-Security-Policy runs no inline script),
++//     and the counts the page shows, build/skyline/skyline.json.
++// The widget's folder: Toolchain Settings' paths.skyline (config.json only), else the umbrella checkout's
++// (<silinx>/../skyline).
++import fs from 'node:fs/promises';
++import fss from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { loadConfig, resolveTool } from './toolchain.js';
++import { runCommand, capture } from './jobs.js';
++import { vivadoPart } from './vivado.js';
++import { openXc7Status, prjxrayDbOf } from './openxc7.js';
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
++const SKYLINE_HELP = 'The 3D Skyline is the FASM skyline widget of the silinx-implview checkout (its skyline/ folder, beside Silinx), or set "paths": {"skyline": "/path/to/skyline"} in ~/.silinx/config.json.';
++const mtime = p => { try { return fss.statSync(p).mtimeMs; } catch { return 0; } };
++
++/** The widget's folder: { found, dir, reason }. */
++export function skylineDir(cfg, { root = ROOT } = {}) {
++  const ok = d => fss.existsSync(path.join(d, 'make-page.mjs')) && fss.existsSync(path.join(d, 'build-grid.py'));
++  if (cfg?.paths?.skyline) {
++    const d = path.resolve(cfg.paths.skyline);
++    return ok(d) ? { found: true, dir: d, reason: `paths.skyline (${d})` } : { found: false, dir: null, reason: `paths.skyline (${cfg.paths.skyline}) has no make-page.mjs and build-grid.py` };
++  }
++  const sibling = path.resolve(root, '..', 'skyline');
++  return ok(sibling) ? { found: true, dir: sibling, reason: `the umbrella checkout's (${sibling})` } : { found: false, dir: null, reason: 'the skyline widget not found (paths.skyline, <silinx>/../skyline)' };
++}
++
++/** The FASM of a build: { file, label, flow } for the open flow's (synthTool openxc7), else for AMD Vivado's, or
++ *  { file: null, reason } when there is none or it is older than the build; `bit2fasm` when Vivado's bitstream must
++ *  be decoded first (no Cross-Check's FASM as new as the routed checkpoint). */
++export function skylineFasm(buildDir, top, synthTool) {
++  if (synthTool === 'openxc7') {
++    const f = path.join(buildDir, 'openxc7', 'routed.fasm');
++    if (!mtime(f)) return { file: null, reason: 'the open 7-series flow has no FASM (build/openxc7/routed.fasm): run Place & Route first' };
++    return { file: f, label: `${top}, openXC7 (nextpnr)`, flow: 'nextpnr-xilinx FASM (open 7-series flow, openXC7)' };
++  }
++  const dcp = mtime(path.join(buildDir, 'post_route.dcp'));
++  if (!dcp) return { file: null, reason: 'AMD Vivado has no routed design (build/post_route.dcp): run Place & Route first' };
++  const label = `${top}, Vivado (bit2fasm)`, flow = 'AMD Vivado\'s bitstream decoded by Project X-Ray bit2fasm';
++  const cc = path.join(buildDir, 'implview', 'crosscheck', 'design.fasm');
++  if (mtime(cc) >= dcp) return { file: cc, label, flow };
++  const bit = path.join(buildDir, `${top}.bit`), openBit = path.join(buildDir, 'openxc7', `${top}.bit`);
++  const sameAsOpen = () => { try { return fss.readFileSync(bit).equals(fss.readFileSync(openBit)); } catch { return false; } };
++  if (mtime(bit) < dcp || sameAsOpen()) return { file: null, reason: 'AMD Vivado\'s bitstream is missing or older than its routed design: run Generate Programming File (or Cross-Check) first' };
++  return { file: path.join(buildDir, 'skyline', 'vivado.fasm'), label, flow, bit2fasm: bit };
++}
++
++/** The 3D Skyline of a project's build: the page and its counts ({ part, die, grid, samples }, build/skyline/skyline.json). */
++export async function skylineProject(job, { project, projectDir }) {
++  const buildDir = path.join(projectDir, 'build'), top = project.top, part = vivadoPart(project.device);
++  const cfg = await loadConfig();
++  const w = skylineDir(cfg);
++  if (!w.found) throw Object.assign(new Error(`${w.reason}. ${SKYLINE_HELP}`), { status: 400 });
++  const f = skylineFasm(buildDir, top, project.synthTool);
++  if (!f.file) throw Object.assign(new Error(f.reason), { status: 400 });
++  const out = path.join(buildDir, 'skyline');
++  await fs.mkdir(out, { recursive: true });
++  const db = prjxrayDbOf(cfg, part);
++  if (f.bit2fasm) {
++    const st = openXc7Status(cfg, part);
++    if (!st.tools.bit2fasm) throw Object.assign(new Error(`bit2fasm not found (paths.bit2fasm or PATH). ${st.help}`), { status: 400 });
++    if (!db) throw Object.assign(new Error(`no Project X-Ray database of ${part} (openxc7.prjxrayDb)`), { status: 400 });
++    // bit2fasm writes the FASM on its standard output: kept in build/skyline/vivado.fasm, not in the log
++    job.log(`$ bit2fasm --db-root ${db.root} --part ${db.part} ${top}.bit > skyline/vivado.fasm`);
++    const dec = await capture(st.tools.bit2fasm, ['--db-root', db.root, '--part', db.part, `${top}.bit`], { cwd: buildDir, timeoutMs: 600000 });
++    if (dec.code !== 0) throw new Error(`bit2fasm failed (exit code ${dec.code})`);
++    await fs.writeFile(f.file, String(dec.out).split(/\r?\n/).filter(l => /^[A-Z0-9_]+_X\d+Y\d+\.\S/.test(l)).join('\n') + '\n');
++  }
++  const python = resolveTool('python3', cfg) || 'python3';
++  const run = async (cmd, args) => { const code = await runCommand(job, cmd, args, { cwd: buildDir }); if (code !== 0) throw new Error(`${path.basename(args[0])} failed (exit code ${code})`); };
++  const grid = path.join(out, 'grid.json');
++  // (the die's grid once per part: again when the script is newer)
++  const gridPart = path.join(out, 'grid.part');
++  const gridOf = fss.existsSync(gridPart) ? fss.readFileSync(gridPart, 'utf8') : '';
++  if (gridOf !== part || mtime(grid) < mtime(path.join(w.dir, 'build-grid.py'))) {
++    await run(python, ['-I', path.join(w.dir, 'build-grid.py'), db?.part || part, ...(db ? ['--db', path.dirname(db.root)] : []), '-o', grid]);
++    await fs.writeFile(gridPart, part);
++  }
++  await run(process.execPath, [path.join(w.dir, 'make-page.mjs'), '--grid', grid, '--part', part, '--fasm', f.file, '--label', f.label, '--flow', f.flow,
++    '-o', 'skyline.html', '--app-out', path.join('skyline', 'app.html'), '--json', path.join('skyline', 'skyline.json')]);
++  const r = JSON.parse(await fs.readFile(path.join(out, 'skyline.json'), 'utf8'));
++  job.log(`3D Skyline: build/skyline.html (${path.relative(buildDir, f.file)})`);
++  return r;
++}
++
++/** The interface's page of the last 3D Skyline (build/skyline/app.html), or null. */
++export async function skylineAppPage(buildDir) {
++  return fs.readFile(path.join(buildDir, 'skyline', 'app.html'), 'utf8').catch(() => null);
++}
+diff --git a/test/mcp-modules.test.js b/test/mcp-modules.test.js
+index 7c36a7f..622f2da 100644
+--- a/test/mcp-modules.test.js
++++ b/test/mcp-modules.test.js
+@@ -90,7 +90,7 @@ test('the tools: those of the areas, the ones of before the split in their order
+   assert.deepEqual(names(BOARD_TOOLS), ['program_board']);   // (Configure Target Device, #2674, #2298)
+   assert.deepEqual(names(CAPTURE_TOOLS), ['capture_settings', 'capture']);   // (the logic analyzer, #3176)
+   assert.deepEqual(names(TIMING_TOOLS), ['timing_paths']);
+-  assert.deepEqual(names(IMPLVIEW_TOOLS), ['fpga_view', 'cross_check']);   // (a 7-series build's view and Cross-Check, #implview, #crosscheck)
++  assert.deepEqual(names(IMPLVIEW_TOOLS), ['fpga_view', 'cross_check', 'fpga_skyline']);   // (a 7-series build's view and Cross-Check, #implview, #crosscheck)
+   assert.deepEqual(names(LAB_TOOLS), ['lab']);   // (the guided labs, #3179)
+   assert.deepEqual(names(GRADE_TOOLS), ['grade']);   // (automatic grading, #3192)
+   assert.deepEqual(mcp.TOOLS, [...PROJECT_TOOLS, ...SETTINGS_TOOLS, ...NEW_SOURCE_TOOLS, ...WIZARD_TOOLS, ...CONSTRAINTS_TOOLS, ...TEST_BENCH_TOOLS, ...CONVERT_TOOLS, ...VIEW_TOOLS, ...TABLE_TOOLS, ...NOTATION_TOOLS, ...CHECK_TOOLS, ...FSM_TOOLS, ...CIRCUIT_TOOLS, ...KICAD_TOOLS, ...SCHEMATIC_TOOLS, ...SYMBOL_TOOLS, ...SYMBOL_INFO_TOOLS, ...SIMULATE_DRAWING_TOOLS, ...SOURCE_TOOLS, ...FIND_TOOLS, ...EDITOR_TOOLS, ...TRANSFER_TOOLS, ...MERGE_TOOLS, ...LINK_TOOLS, ...GIT_TOOLS, ...COLLAB_TOOLS, ...HDL_TOOLS, ...VERIFY_TOOLS, ...WCFG_TOOLS, ...HLS_TOOLS, ...PROCESS_TOOLS, ...BOARD_TOOLS, ...CAPTURE_TOOLS, ...TIMING_TOOLS, ...IMPLVIEW_TOOLS, ...LAB_TOOLS, ...GRADE_TOOLS]);
+diff --git a/test/mcp.test.js b/test/mcp.test.js
+index fc18c1f..91eae39 100644
+--- a/test/mcp.test.js
++++ b/test/mcp.test.js
+@@ -65,7 +65,7 @@ test('the handshake: the protocol version, the server, its tools with their sche
+   const { tools } = (await srv.send('tools/list')).result;
+   assert.deepEqual(tools.map(t => t.name), ['list_examples', 'list_projects', 'new_project_from_example', 'new_project', 'set_top', 'project_info', 'read_file', 'write_file',
+     'list_devices', 'set_design_properties', 'set_process_properties', 'set_source_properties', 'new_source', 'clock_manager', 'block_memory', 'constraints_wizard', 'check_constraints', 'test_bench_wizard', 'convert_module', 'convert_drawing', 'related_view', 'set_output_logic', 'set_notation', 'set_schematic_symbols', 'check_drawing', 'set_fsm_outputs', 'set_fsm_look', 'circuit_parts', 'edit_circuit', 'part_libraries', 'import_part', 'export_part', 'rearrange_wires', 'rearrange_schematic', 'move_junction', 'add_markers', 'set_wire_style', 'read_symbol', 'edit_symbol', 'update_symbols', 'place_instance', 'set_instance_width', 'symbol_info', 'simulate_drawing', 'unset_top', 'remove_from_project', 'add_to_project', 'rename_file', 'rename_module', 'delete_file', 'delete_project', 'find_in_project', 'open_in_editor',
+-    'export_project', 'import_project', 'import_source', 'merge_preview', 'merge_contribution', 'undo_merge', 'project_link', 'open_link', 'short_links', 'delete_short_link', 'git_clone', 'git_init', 'git_status', 'git_commit', 'git_push', 'git_pull', 'git_log', 'git_checks', 'git_diff', 'share_project', 'follow_project', 'check_syntax', 'simulate', 'verify', 'save_wave_config', 'load_wave_config', 'c_simulation', 'c_cosimulation', 'c_synthesis_report', 'c_generated', 'run_process', 'get_report', 'program_board', 'capture_settings', 'capture', 'timing_paths', 'fpga_view', 'cross_check', 'lab', 'grade']);
++    'export_project', 'import_project', 'import_source', 'merge_preview', 'merge_contribution', 'undo_merge', 'project_link', 'open_link', 'short_links', 'delete_short_link', 'git_clone', 'git_init', 'git_status', 'git_commit', 'git_push', 'git_pull', 'git_log', 'git_checks', 'git_diff', 'share_project', 'follow_project', 'check_syntax', 'simulate', 'verify', 'save_wave_config', 'load_wave_config', 'c_simulation', 'c_cosimulation', 'c_synthesis_report', 'c_generated', 'run_process', 'get_report', 'program_board', 'capture_settings', 'capture', 'timing_paths', 'fpga_view', 'cross_check', 'fpga_skyline', 'lab', 'grade']);
+   // (a tool that deletes or replaces what is in the workspace says so: the client asks before it runs)
+   assert.deepEqual(tools.filter(t => t.annotations.destructiveHint).map(t => t.name), ['set_top', 'write_file', 'set_design_properties', 'set_source_properties', 'clock_manager', 'block_memory', 'convert_module', 'delete_file', 'delete_project', 'find_in_project', 'import_source', 'merge_contribution', 'undo_merge', 'delete_short_link', 'git_pull', 'program_board', 'grade']);
+   for (const t of tools) {
+diff --git a/test/skyline.test.js b/test/skyline.test.js
+new file mode 100644
+index 0000000..ec93afa
+--- /dev/null
++++ b/test/skyline.test.js
+@@ -0,0 +1,60 @@
++// 3D Skyline (#skyline, server/skyline.js; the MCP server's fpga_skyline): the widget's folder, the FASM of a build (the
++// open flow's nextpnr FASM, AMD Vivado's decoded bitstream, never one older than the build) and the tool's answer.
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { skylineDir, skylineFasm } from '../server/skyline.js';
++import { skylineResult } from '../server/mcp-implview.js';
++
++const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'silinx-skyline-'));
++const put = (f, text = 'x', t = Date.now() / 1000) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text); fs.utimesSync(f, t, t); };
++
++test('the widget\'s folder: paths.skyline, else the umbrella checkout\'s <silinx>/../skyline; one without its scripts refused', () => {
++  const d = tmp(), root = path.join(d, 'Silinx'), sky = path.join(d, 'skyline');
++  fs.mkdirSync(root);
++  assert.deepEqual(skylineDir({}, { root }), { found: false, dir: null, reason: 'the skyline widget not found (paths.skyline, <silinx>/../skyline)' });
++  put(path.join(sky, 'make-page.mjs')); put(path.join(sky, 'build-grid.py'));
++  assert.equal(skylineDir({}, { root }).dir, sky);
++  assert.match(skylineDir({}, { root }).reason, /^the umbrella checkout's/);
++  const other = path.join(d, 'other');
++  fs.mkdirSync(other);
++  assert.deepEqual(skylineDir({ paths: { skyline: other } }, { root }), { found: false, dir: null, reason: `paths.skyline (${other}) has no make-page.mjs and build-grid.py` });
++  assert.equal(skylineDir({ paths: { skyline: sky } }, { root: other }).dir, sky);
++});
++
++test('the FASM of a build: the open flow\'s routed.fasm; Vivado\'s Cross-Check FASM when as new as the routed design, else its bitstream decoded; none older than the build', () => {
++  const b = tmp(), now = Date.now() / 1000;
++  assert.match(skylineFasm(b, 'top', 'openxc7').reason, /no FASM \(build\/openxc7\/routed\.fasm\)/);
++  put(path.join(b, 'openxc7', 'routed.fasm'));
++  assert.deepEqual(skylineFasm(b, 'top', 'openxc7'), { file: path.join(b, 'openxc7', 'routed.fasm'), label: 'top, openXC7 (nextpnr)', flow: 'nextpnr-xilinx FASM (open 7-series flow, openXC7)' });
++  assert.match(skylineFasm(b, 'top', 'vivado').reason, /no routed design/);
++  put(path.join(b, 'post_route.dcp'), 'dcp', now - 100);
++  assert.match(skylineFasm(b, 'top', 'vivado').reason, /bitstream is missing or older/);
++  put(path.join(b, 'top.bit'), 'vivado bit', now - 50);
++  const dec = skylineFasm(b, 'top', 'vivado');
++  assert.deepEqual([dec.file, dec.bit2fasm, dec.label], [path.join(b, 'skyline', 'vivado.fasm'), path.join(b, 'top.bit'), 'top, Vivado (bit2fasm)']);
++  // (the open flow's bitstream copied to build/top.bit: not Vivado's)
++  put(path.join(b, 'openxc7', 'top.bit'), 'vivado bit');
++  assert.match(skylineFasm(b, 'top', 'vivado').reason, /bitstream is missing or older/);
++  // (Cross-Check's FASM: older than the routed design not taken, as new taken)
++  put(path.join(b, 'implview', 'crosscheck', 'design.fasm'), 'f', now - 200);
++  assert.match(skylineFasm(b, 'top', 'vivado').reason, /older/);
++  put(path.join(b, 'implview', 'crosscheck', 'design.fasm'), 'f', now - 10);
++  assert.equal(skylineFasm(b, 'top', 'vivado').file, path.join(b, 'implview', 'crosscheck', 'design.fasm'));
++  assert.equal(skylineFasm(b, 'top', 'vivado').bit2fasm, undefined);
++});
++
++test('fpga_skyline\'s answer: the page\'s counts, the tallest columns first (ties by name), as many as asked', () => {
++  const col = (tile, features, family = 'INT') => ({ tile, type: tile.replace(/_X\d+Y\d+$/, ''), family, features, gx: 1, gy: 2 });
++  const r = { part: 'xc7s25csga324-1', die: 'XC7S25', grid: { w: 102, h: 105, configTiles: 4996, source: {} }, samples: [{
++    file: 'top, openXC7 (nextpnr)', fasm: 'routed.fasm', flow: 'nextpnr', features: 30, tiles: 3, share: 0.06, cleared: 0, bad: 0,
++    tallest: { tile: 'INT_L_X2Y3', features: 12 }, families: { CLB: { tiles: 1, features: 8, onDie: 1000 } }, off: [],
++    columns: [col('CLBLL_L_X2Y3', 8, 'CLB'), col('INT_R_X3Y3', 10), col('INT_L_X2Y3', 12), col('INT_L_X2Y4', 10)] }] };
++  const { data } = skylineResult('p', r, 3);
++  assert.deepEqual(data.columns.map(c => [c.tile, c.features]), [['INT_L_X2Y3', 12], ['INT_L_X2Y4', 10], ['INT_R_X3Y3', 10]]);
++  assert.deepEqual([data.features, data.tiles, data.share_pct, data.tallest.tile, data.page, data.die], [30, 3, 0.06, 'INT_L_X2Y3', 'build/skyline.html', 'XC7S25']);
++  assert.deepEqual(Object.keys(data.columns[0]), ['tile', 'type', 'family', 'features']);
++  assert.equal(skylineResult('p', r, 0).data.columns.length, 0);
++});
+diff --git a/test/tool-descriptors.test.js b/test/tool-descriptors.test.js
+index 618acc5..5a16832 100644
+--- a/test/tool-descriptors.test.js
++++ b/test/tool-descriptors.test.js
+@@ -3,7 +3,7 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import fs from 'node:fs';
+-import { ISE, NO_FLOW, DESIGN_ONLY, SILINX, SILINX_ICE40, SILINX_XC7, SILINX_ECP5, SILINX_GOWIN, VIVADO, OPENXC7, CROSS_CHECK, TOOLS, allTasks, buildProcesses, hasTask, simModelsOf, toolOf, MESSAGE_LINE, EXTRA_STEPS, IMPL_IDS } from '../web/js/tool-descriptors.js';
++import { ISE, NO_FLOW, DESIGN_ONLY, SILINX, SILINX_ICE40, SILINX_XC7, SILINX_ECP5, SILINX_GOWIN, VIVADO, OPENXC7, CROSS_CHECK, SKYLINE, TOOLS, allTasks, buildProcesses, hasTask, simModelsOf, toolOf, MESSAGE_LINE, EXTRA_STEPS, IMPL_IDS } from '../web/js/tool-descriptors.js';
+ import { XILINX_STEPS, orderSteps } from '../packages/silinx-fpga/src/open-steps.js';
+ import { ICE40_STEPS } from '../packages/silinx-fpga/src/open-flow-ice40.js';
+ import { XC7_STEPS } from '../packages/silinx-fpga/src/open-flow-xc7.js';
+@@ -281,11 +281,14 @@ test('#1649 AMD Vivado on the Artix-7 (the local server): ISE\'s step names, Viv
+   assert.equal(toolOf({ part: 'xc3s250e' }, true, { standalone: false }), SILINX);
+   const t = built(VIVADO);
+   assert.deepEqual(t.map(shape), ['summary', 'constraints', { synth: ['rtl', 'check', 'cmodel'] },
+-    { impl: [{ translate: [] }, { map: [] }, { par: ['trce', 'xpwr', 'pin2ucf', 'fpgaview', 'crosscheck'] }] }, 'bitgen', 'emulate', { config: ['impact'] }]);
++    { impl: [{ translate: [] }, { map: [] }, { par: ['trce', 'xpwr', 'pin2ucf', 'fpgaview', 'crosscheck', 'skyline'] }] }, 'bitgen', 'emulate', { config: ['impact'] }]);
+   assert.equal(find(t, 'synth').label, 'Synthesize - Vivado');
+   // (its FPGA view implview's, #implview; Cross-Check, #crosscheck: optional, the interface gives it its action)
+   assert.equal(find(t, 'crosscheck').label, CROSS_CHECK);
+   assert.ok(!find(built(VIVADO, { actions: { ...allActions(VIVADO), crosscheck: undefined } }), 'crosscheck'));
++  // (3D Skyline, #skyline: optional as well)
++  assert.equal(find(t, 'skyline').label, SKYLINE);
++  assert.ok(!find(built(VIVADO, { actions: { ...allActions(VIVADO), skyline: undefined } }), 'skyline'));
+   for (const id of ['synth', 'impl', 'bitgen']) assert.equal(find(t, id).title, 'AMD Vivado', id);
+   assert.deepEqual(VIVADO.steps.map(s => s.id), ['synth', 'translate', 'map', 'par', 'trce', 'pin2ucf', 'xpwr', 'bitgen', 'fpgaview']);
+   assert.ok(orderSteps(VIVADO.steps, ['bitgen']).includes('par'));
+@@ -361,7 +364,7 @@ test('the open 7-series flow (openXC7, #openxc7): any 7-series device with the p
+   assert.equal(toolOf({ part: 'xc3s250e' }, false, { openxc7: true }), ISE, 'not a 7-series');
+   const t = built(OPENXC7);
+   assert.deepEqual(t.map(shape), ['summary', 'constraints', { synth: ['rtl', 'check', 'cmodel'] },
+-    { impl: [{ translate: [] }, { map: [] }, { par: ['trce', 'fpgaview', 'crosscheck'] }] }, 'bitgen', 'emulate', { config: ['impact'] }]);
++    { impl: [{ translate: [] }, { map: [] }, { par: ['trce', 'fpgaview', 'crosscheck', 'skyline'] }] }, 'bitgen', 'emulate', { config: ['impact'] }]);
+   assert.equal(find(t, 'synth').label, 'Synthesize - Yosys (openXC7)');
+   const src = read('server/openxc7.js');
+   assert.deepEqual(OPENXC7.steps.map(s => s.id), ['synth', 'translate', 'map', 'par', 'trce', 'bitgen', 'fpgaview']);
+diff --git a/test/xise-routes.test.js b/test/xise-routes.test.js
+index aea1736..e0905bc 100644
+--- a/test/xise-routes.test.js
++++ b/test/xise-routes.test.js
+@@ -23,7 +23,7 @@ test('#405 ISE project routes: mounted alone, the .xise and zip routes', () => {
+ test('#405 ISE project routes: registerImplRoutes registers them after its own, then Merge Contribution\'s (#4206), then KiCad\'s libraries\' (#4285)', () => {
+   const { api, calls } = recorder();
+   registerImplRoutes(api, { wrap: f => f, projects });
+-  assert.equal(calls.length, 29);   // (and Cross-Check's, #crosscheck)
++  assert.equal(calls.length, 31);   // (and Cross-Check's, #crosscheck, and the 3D Skyline's two, #skyline)
+   assert.ok(calls.includes('post /projects/:p/capture'), 'the capture of the logic analyzer (#3176)');
+   assert.deepEqual(calls.slice(-12, -7), ['get /projects/:p/export.xise', 'post /projects/import-xise', 'get /projects/:p/export.zip', 'post /projects/import-zip', 'post /projects/:p/sync-xise']);
+   assert.deepEqual(calls.slice(-7, -4), ['post /projects/:p/merge-preview', 'post /projects/:p/merge', 'post /projects/:p/undo-merge']);
+diff --git a/web/js/api.js b/web/js/api.js
+index 871f0e9..d3c5262 100644
+--- a/web/js/api.js
++++ b/web/js/api.js
+@@ -130,6 +130,8 @@ export const api = {
+   reports: name => req('GET', `/api/projects/${enc(name)}/reports`),
+   fpgaView: name => req('GET', `/api/projects/${enc(name)}/fpga-view`),
+   crossCheck: name => req('POST', `/api/projects/${enc(name)}/crosscheck`, {}),   // (#crosscheck: a job)
++  skyline: name => req('POST', `/api/projects/${enc(name)}/skyline`, {}),   // (#skyline: a job)
++  skylinePage: name => req('GET', `/api/projects/${enc(name)}/skyline`),
+   bitinfo: name => req('GET', `/api/projects/${enc(name)}/bitinfo`),
+   program: body => req('POST', '/api/program', body),
+   scan: body => req('POST', '/api/jtag/scan', body),
+diff --git a/web/js/i18n-fpga.js b/web/js/i18n-fpga.js
+index 6dca0cf..642ce8e 100644
+--- a/web/js/i18n-fpga.js
++++ b/web/js/i18n-fpga.js
+@@ -4,6 +4,7 @@ export const FPGA_PT = {
+   'View Implemented Design (FPGA)': 'Ver Projeto Implementado (FPGA)',
+   // a 7-series build of AMD Vivado or of the open 7-series flow (#implview, #openxc7, #crosscheck)
+   'Cross-Check Implementation against Bitstream': 'Verificar a Implementação contra o Bitstream',
++  '3D Skyline (FASM)': 'Skyline 3D (FASM)',
+   'Synthesize - Yosys (openXC7)': 'Sintetizar - Yosys (openXC7)',
+   'Open 7-series flow (openXC7)': 'Fluxo aberto da série 7 (openXC7)',
+   'openXC7 (Yosys + nextpnr-xilinx; no Vivado needed)': 'openXC7 (Yosys + nextpnr-xilinx; sem o Vivado)',
+@@ -65,6 +66,7 @@ export const FPGA_PT_PATTERNS = [
+   [/^address ([01]+) → ([01])$/, 'endereço $1 → $2'],
+   [/^Inside (\S+)$/, 'Dentro de $1'],
+   [/^Process "Cross-Check Implementation against Bitstream" completed successfully: the report is (\S+)$/, 'O processo "Verificar a Implementação contra o Bitstream" terminou com sucesso: o relatório é $1'],
++  [/^Process "3D Skyline \(FASM\)" completed successfully: the page is (\S+)$/, 'O processo "Skyline 3D (FASM)" terminou com sucesso: a página é $1'],
+   [/^(\d+) of (\d+) slices · (\d+) I\/Os$/, '$1 de $2 slices · $3 E/S'],   // (the status line's, #2763)
+   [/^The implemented design could not be read: (.*)$/s, 'Não foi possível ler o projeto implementado: $1'],
+   // the timing report's Paths panel (#3178)
+diff --git a/web/js/processes.js b/web/js/processes.js
+index 22e58b0..9b78208 100644
+--- a/web/js/processes.js
++++ b/web/js/processes.js
+@@ -116,6 +116,8 @@ function selectionProcesses(sel, view) {
+         pin2ucf: () => backAnnotatePins(top), fpgaview: () => openFpgaView(top), config: () => openImpact(), impact: () => openImpact(),
+         // (Cross-Check, #crosscheck: a 7-series build of AMD Vivado or of the open flow, web/js/crosscheck.js)
+         ...(['vivado', 'openxc7'].includes(projectTool().id) ? { crosscheck: async () => (await import('./crosscheck.js')).runCrossCheck() } : {}),
++        // (3D Skyline, #skyline: the build's FASM on its die, web/js/skyline.js)
++        ...(['vivado', 'openxc7'].includes(projectTool().id) ? { skyline: async () => (await import('./skyline.js')).runSkyline() } : {}),
+         // (the logic analyzer, #3176: web/js/capture-ui.js)
+         capture: async () => (await import('./capture-ui.js')).runCaptureOnBoard(),
+         'capture-settings': async () => (await import('./capture-ui.js')).captureSettings(),
+diff --git a/web/js/skyline.js b/web/js/skyline.js
+new file mode 100644
+index 0000000..7ce4259
+--- /dev/null
++++ b/web/js/skyline.js
+@@ -0,0 +1,34 @@
++// Silinx - 3D Skyline (#skyline): a 7-series build's FASM drawn as a skyline on its die by the FASM skyline widget
++// (server/skyline.js), its lines in the console, its page in a tab of its own (made before the job ends, a tab the
++// browser opens only on the click); the page is also build/skyline.html, offline.
++import { api, followJob } from './api.js';
++import { S } from './app.js';
++import { log } from './console.js';
++import { SKYLINE } from './tool-descriptors.js';
++import { renderProcesses } from './processes.js';
++
++export async function runSkyline() {
++  if (!S.project) return;
++  const tab = window.open('', '_blank');
++  log(`\nStarted : "${SKYLINE}".\n`, 'hdr');
++  S.status.skyline = 'running';
++  renderProcesses();
++  let res;
++  try {
++    const { job } = await api.skyline(S.project.name);
++    res = await followJob(job, line => log(line, /^ERROR/.test(line) ? 'err' : /^(CRITICAL )?WARNING/.test(line) ? 'warn' : undefined));
++  } catch (e) { res = { status: 'error', error: e.message }; }
++  let ok = res.status === 'ok';
++  if (ok) {
++    // (the page's scripts the server's, /vendor/skyline/: the pages' Content-Security-Policy runs no inline script)
++    const page = await api.skylinePage(S.project.name).catch(e => ({ available: false, reason: e.message }));
++    if (page.available && tab) tab.location = URL.createObjectURL(new Blob([page.html.replaceAll('{{ORIGIN}}', location.origin)], { type: 'text/html' }));
++    else { ok = false; res.error = page.reason || 'the page could not be opened'; }
++  }
++  if (!ok) tab?.close();
++  S.status.skyline = ok ? 'ok' : 'err';
++  renderProcesses();
++  if (ok) log(`\nProcess "${SKYLINE}" completed successfully: the page is build/skyline.html`, 'ok');
++  else log(`ERROR: ${SKYLINE}: ${res.error || 'failed'}`, 'err');
++  return ok;
++}
+diff --git a/web/js/tool-descriptors.js b/web/js/tool-descriptors.js
+index 8051d74..1c81c90 100644
+--- a/web/js/tool-descriptors.js
++++ b/web/js/tool-descriptors.js
+@@ -23,6 +23,8 @@ export const EXTRA_STEPS = {
+ };
+ // Cross-Check (#crosscheck): a 7-series build against its bitstream (AMD Vivado's, the open 7-series flow's: server/crosscheck.js)
+ export const CROSS_CHECK = 'Cross-Check Implementation against Bitstream';
++// 3D Skyline (#skyline): a 7-series build's FASM drawn on its die (the FASM skyline widget: server/skyline.js)
++export const SKYLINE = '3D Skyline (FASM)';
+ // the implementation runs (one build directory: exclusive), and every process whose mark is kept in the build folder
+ export const FLOW_PROCS = ['synth', 'impl', 'translate', 'map', 'par', 'bitgen'];
+ export const IMPL_IDS = ['synth', 'translate', 'map', 'par', 'impl', 'bitgen', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'xpwr', 'trce', 'fpgaview'];
+@@ -58,6 +60,7 @@ const XILINX_TREE = [
+       proc('pin2ucf', EXTRA_STEPS.pin2ucf, implement),
+       proc('fpgaview', EXTRA_STEPS.fpgaview, { ...implement, ico: 'chip' }),
+       proc('crosscheck', CROSS_CHECK, { ...implement, optional: true }),   // (AMD Vivado's and the open 7-series flow's only)
++      proc('skyline', SKYLINE, { ...implement, ico: 'chip', optional: true }),   // (theirs too)
+     ]),
+   ]),
+   proc('bitgen', 'Generate Programming File', { ...implement, flow: upTo('bitgen') }),
+@@ -172,7 +175,7 @@ export const ISE = {
+   constraints: UCF,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit', prom: '{top}_prom.bit' },
+-  tree: treeOf(['crosscheck', 'capture']),
++  tree: treeOf(['crosscheck', 'skyline', 'capture']),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -194,7 +197,7 @@ export const SILINX = {
+   constraints: UCF,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit', prom: '{top}_prom.bit' },
+-  tree: treeOf(['crosscheck', 'synth-open'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'skyline', 'synth-open'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -215,7 +218,7 @@ export const SILINX_ICE40 = {
+   // (#2298: no JTAG chain and no PROM; the .bin written into the board's SPI flash: openFPGALoader in the local server, WebUSB
+   // in the browser edition; the page web/js/program-open.js, as the ECP5's and the Gowin's)
+   program: { process: 'config', page: 'program-open', title: 'Program Flash', target: 'spi-flash', file: '{top}.bin' },
+-  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'skyline', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -237,7 +240,7 @@ export const SILINX_XC7 = {
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit' },
+   // (the logic analyzer: Implement inserts its core with a BSCANE2, #3767)
+-  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'skyline', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -257,7 +260,7 @@ export const SILINX_ECP5 = {
+   constraints: LPF,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'program-open', title: 'Program FPGA', target: 'sram', file: '{top}.bit' },
+-  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'skyline', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -275,7 +278,7 @@ export const SILINX_GOWIN = {
+   constraints: CST,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'program-open', title: 'Program FPGA', target: 'sram', file: '{top}.fs' },
+-  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'skyline', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+-- 
+2.43.0
+

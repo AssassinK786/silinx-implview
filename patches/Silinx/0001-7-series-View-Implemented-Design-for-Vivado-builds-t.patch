@@ -1,8 +1,9 @@
 From feb016abee9cb4dcda2b55107e91211a897ade6a Mon Sep 17 00:00:00 2001
 From: AssassinK786 <85348050+AssassinK786@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 11:03:20 +0530
-Subject: [PATCH] 7-series: View Implemented Design for Vivado builds through
- implview, the open 7-series flow (openXC7), Cross-Check against the bitstream
+Subject: [PATCH 1/2] 7-series: View Implemented Design for Vivado builds
+ through implview, the open 7-series flow (openXC7), Cross-Check against the
+ bitstream
 
 - View Implemented Design (FPGA) of an AMD Vivado build: the fpgaview step runs implview export --detail on build/post_route.dcp (server/implview.js); core/implview-model.js makes implview's design and device files the view's model (family-neutral tiles on Vivado's grid, LUT equations from INIT and pin map, flip-flop settings, nets with their route tiles, clock nets).
 - The open 7-series flow (synthesis tool openxc7, server/openxc7.js, core/openxc7.js): Yosys synth_xilinx, nextpnr-xilinx, fasm2frames, xc7frames2bit in build/openxc7; its reports and its FPGA view (implview import-nextpnr with nextpnr's INITs and routes).
