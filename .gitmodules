@@ -1,0 +1,6 @@
+[submodule "Silinx"]
+	path = Silinx
+	url = https://github.com/AssassinK786/Silinx.git
+[submodule "implview-plus"]
+	path = implview-plus
+	url = https://github.com/AssassinK786/implview-plus.git
