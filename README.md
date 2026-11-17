@@ -25,8 +25,8 @@ Each submodule and its patches keep that project's license; the scripts and docs
 ```
 git clone --recurse-submodules https://github.com/AssassinK786/silinx-implview.git
 cd silinx-implview
-scripts/setup.sh        # Node.js deps for Silinx, Python venv for implview-plus
-scripts/start.sh        # start Silinx with implview-plus on the PATH; open the printed URL
+scripts/setup.sh        # Node.js deps for Silinx, Python venv for fpga-design-implview (+ patches)
+scripts/start.sh        # start Silinx with implview on the PATH; open the printed URL
 ```
 
 Requirements: Linux or WSL2, Node.js >= 18, Python >= 3.11, Vivado (7-series device files) for Vivado builds and checkpoint
