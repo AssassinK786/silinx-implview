@@ -1,6 +1,6 @@
 [submodule "Silinx"]
 	path = Silinx
-	url = https://github.com/AssassinK786/Silinx.git
-[submodule "implview-plus"]
-	path = implview-plus
-	url = https://github.com/AssassinK786/implview-plus.git
+	url = https://github.com/pmnmalo/Silinx.git
+[submodule "fpga-design-implview"]
+	path = fpga-design-implview
+	url = https://github.com/rardino/fpga-design-implview.git

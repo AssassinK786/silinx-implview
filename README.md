@@ -1,15 +1,24 @@
 # silinx-implview
 
 An ISE-style FPGA IDE ([Silinx](https://github.com/pmnmalo/Silinx)) combined with a Vivado implemented-design viewer
-([implview-plus](https://github.com/AssassinK786/implview-plus)) for Xilinx 7-series (UltraScale+ / Versal planned),
+([fpga-design-implview](https://github.com/rardino/fpga-design-implview)) for Xilinx 7-series (UltraScale+ / Versal planned),
 with open-source cross-verification of the bitstream (openXC7: Yosys, nextpnr-xilinx, prjxray).
 
-| Submodule | What | License |
+| Submodule (original repository, unmodified) | What | License |
 |---|---|---|
-| `Silinx/` | Project Navigator-style IDE: HDL editor, schematics, simulation, board emulator, ISE / Vivado / open flows | AGPL-3.0-only |
-| `implview-plus/` | Device view of a routed Vivado checkpoint: sites by module, LUT equations, routed nets, clock network, timing paths; `crosscheck` against prjxray `bit2fasm` | MIT |
+| `Silinx/` → [pmnmalo/Silinx](https://github.com/pmnmalo/Silinx) | Project Navigator-style IDE: HDL editor, schematics, simulation, board emulator, ISE / Vivado / open flows | AGPL-3.0-only |
+| `fpga-design-implview/` → [rardino/fpga-design-implview](https://github.com/rardino/fpga-design-implview) | Device view of a routed Vivado checkpoint | MIT |
 
-Each submodule keeps its own license; the files in this repository (scripts, docs) are MIT.
+This repository's own additions are kept as patches in `patches/<submodule>/`, applied on top of the pinned upstream
+commits by `scripts/setup.sh`:
+
+- `patches/fpga-design-implview/`: detailed export (LUT INIT + pin map, FF settings, routed nets), interactive viewer
+  (module tree, LUT equations, net routes, clock network, timing paths), `crosscheck` against prjxray `bit2fasm`,
+  `import-nextpnr` for the open flow (MIT, as the upstream project).
+- `patches/Silinx/` (coming): Vivado backend for *View Implemented Design*, an openXC7 flow, a *Cross-check* process
+  (AGPL-3.0-only, as Silinx).
+
+Each submodule and its patches keep that project's license; the scripts and docs of this repository are MIT.
 
 ## Get it
 
@@ -25,9 +34,9 @@ export, and for the open flow and cross-check: Yosys, nextpnr-xilinx (with chipd
 
 ## Status
 
-- implview-plus: 7-series viewer + cross-check working (100 % BEL / LUT INIT / FF / pip agreement with the bitstream on
+- fpga-design-implview patches: 7-series viewer + cross-check working (100 % BEL / LUT INIT / FF / pip agreement with the bitstream on
   Artix-7 and Spartan-7 test designs).
 - Silinx integration (Vivado backend for *View Implemented Design*, an openXC7 flow, a *Cross-check* process):
-  in progress on the `Silinx` submodule's integration branch; the submodule currently tracks upstream Silinx `main`.
+  in progress; it will be added as `patches/Silinx/`.
 - UltraScale+ / Versal: untested (no device files installed); Versal has no open bitstream database, so only
   Vivado-internal consistency checks are possible there.
