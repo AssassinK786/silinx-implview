@@ -15,8 +15,9 @@ commits by `scripts/setup.sh`:
 - `patches/fpga-design-implview/`: detailed export (LUT INIT + pin map, FF settings, routed nets), interactive viewer
   (module tree, LUT equations, net routes, clock network, timing paths), `crosscheck` against prjxray `bit2fasm`,
   `import-nextpnr` for the open flow (MIT, as the upstream project).
-- `patches/Silinx/` (coming): Vivado backend for *View Implemented Design*, an openXC7 flow, a *Cross-check* process
-  (AGPL-3.0-only, as Silinx).
+- `patches/Silinx/`: Vivado backend for *View Implemented Design (FPGA)* (through `implview`), an **openXC7** synthesis
+  tool for 7-series parts (Yosys → nextpnr-xilinx → prjxray → `.bit`), and a **Cross-Check** process and MCP tool
+  (AGPL-3.0-only, as Silinx). See [docs/SILINX_7SERIES_GUIDE.md](docs/SILINX_7SERIES_GUIDE.md).
 
 Each submodule and its patches keep that project's license; the scripts and docs of this repository are MIT.
 
@@ -36,7 +37,8 @@ export, and for the open flow and cross-check: Yosys, nextpnr-xilinx (with chipd
 
 - fpga-design-implview patches: 7-series viewer + cross-check working (100 % BEL / LUT INIT / FF / pip agreement with the bitstream on
   Artix-7 and Spartan-7 test designs).
-- Silinx integration (Vivado backend for *View Implemented Design*, an openXC7 flow, a *Cross-check* process):
-  in progress; it will be added as `patches/Silinx/`.
+- Silinx patches: Vivado and openXC7 flows end to end on Arty S7-25 (blinky, digital clock); cross-check of Vivado
+  builds 100 % on most categories (a few LUT1-in-carry-chain INIT and one pip difference under investigation), openXC7
+  builds bit-identical to nextpnr's FASM after re-encoding; Artix-7 Vivado build 100 %.
 - UltraScale+ / Versal: untested (no device files installed); Versal has no open bitstream database, so only
   Vivado-internal consistency checks are possible there.

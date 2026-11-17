@@ -1,0 +1,2680 @@
+From feb016abee9cb4dcda2b55107e91211a897ade6a Mon Sep 17 00:00:00 2001
+From: AssassinK786 <85348050+AssassinK786@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 11:03:20 +0530
+Subject: [PATCH] 7-series: View Implemented Design for Vivado builds through
+ implview, the open 7-series flow (openXC7), Cross-Check against the bitstream
+
+- View Implemented Design (FPGA) of an AMD Vivado build: the fpgaview step runs implview export --detail on build/post_route.dcp (server/implview.js); core/implview-model.js makes implview's design and device files the view's model (family-neutral tiles on Vivado's grid, LUT equations from INIT and pin map, flip-flop settings, nets with their route tiles, clock nets).
+- The open 7-series flow (synthesis tool openxc7, server/openxc7.js, core/openxc7.js): Yosys synth_xilinx, nextpnr-xilinx, fasm2frames, xc7frames2bit in build/openxc7; its reports and its FPGA view (implview import-nextpnr with nextpnr's INITs and routes).
+- Cross-Check (process, POST /projects/:p/crosscheck, MCP cross_check; server/crosscheck.js, core/crosscheck-fasm.js): implview crosscheck of a Vivado build; an open build's bitstream decoded by bit2fasm against nextpnr's FASM and re-encoded against its frames; both builds compared; UltraScale+ / Versal not cross-checkable.
+- MCP fpga_view; set_design_properties synth_tool openxc7; Portuguese labels; tests (implview-model, openxc7, crosscheck-fasm, mcp-implview) with fixtures from blinky's Arty S7-25 build; changelog fragment (its issue number a placeholder, 9000).
+---
+ changes/9000-implview-openxc7.md         |  29 +++
+ core/crosscheck-fasm.js                  |  90 +++++++
+ core/implview-model.js                   | 313 +++++++++++++++++++++++
+ core/openxc7.js                          | 117 +++++++++
+ server/crosscheck.js                     | 143 +++++++++++
+ server/impl-routes.js                    |  39 ++-
+ server/implview.js                       | 106 ++++++++
+ server/mcp-implview.js                   |  79 ++++++
+ server/mcp-processes.js                  |  16 +-
+ server/mcp-settings.js                   |   6 +-
+ server/mcp.js                            |   3 +-
+ server/openxc7.js                        | 183 +++++++++++++
+ server/toolchain.js                      |   6 +-
+ server/vivado.js                         |  26 +-
+ test/crosscheck-fasm.test.js             |  88 +++++++
+ test/fixtures/implview/blinky-s7.ivd     | 127 +++++++++
+ test/fixtures/implview/xc7s25-part.ivdev | 147 +++++++++++
+ test/implview-model.test.js              | 142 ++++++++++
+ test/mcp-args.test.js                    |   2 +-
+ test/mcp-implview.test.js                |  91 +++++++
+ test/mcp-modules.test.js                 |   4 +-
+ test/mcp.test.js                         |   2 +-
+ test/openxc7.test.js                     | 126 +++++++++
+ test/tool-descriptors.test.js            |  26 +-
+ test/vivado.test.js                      |   2 +-
+ test/xise-routes.test.js                 |   2 +-
+ web/js/api.js                            |   1 +
+ web/js/crosscheck.js                     |  27 ++
+ web/js/device-picker.js                  |   4 +-
+ web/js/fpgaview-details.js               |   3 +-
+ web/js/fpgaview.js                       |   2 +-
+ web/js/i18n-fpga.js                      |   9 +
+ web/js/implement.js                      |   6 +-
+ web/js/processes.js                      |   8 +-
+ web/js/summary.js                        |  10 +-
+ web/js/tool-descriptors.js               |  52 +++-
+ 36 files changed, 1990 insertions(+), 47 deletions(-)
+ create mode 100644 changes/9000-implview-openxc7.md
+ create mode 100644 core/crosscheck-fasm.js
+ create mode 100644 core/implview-model.js
+ create mode 100644 core/openxc7.js
+ create mode 100644 server/crosscheck.js
+ create mode 100644 server/implview.js
+ create mode 100644 server/mcp-implview.js
+ create mode 100644 server/openxc7.js
+ create mode 100644 test/crosscheck-fasm.test.js
+ create mode 100644 test/fixtures/implview/blinky-s7.ivd
+ create mode 100644 test/fixtures/implview/xc7s25-part.ivdev
+ create mode 100644 test/implview-model.test.js
+ create mode 100644 test/mcp-implview.test.js
+ create mode 100644 test/openxc7.test.js
+ create mode 100644 web/js/crosscheck.js
+
+diff --git a/changes/9000-implview-openxc7.md b/changes/9000-implview-openxc7.md
+new file mode 100644
+index 0000000..7124e0e
+--- /dev/null
++++ b/changes/9000-implview-openxc7.md
+@@ -0,0 +1,29 @@
++In short:
++
++- **View Implemented Design (FPGA) for AMD Vivado's 7-series builds:** the chip with its sites coloured by module, each
++  site's LUT equations and flip-flops, the nets and their routes, the clock network and the Design hierarchy in step,
++  made from the routed checkpoint by the implview tool (fpga-design-implview, run as a program of its own).
++- **The open 7-series flow (openXC7):** a synthesis tool of every 7-series project, the Spartan-7's too: Yosys
++  synth_xilinx, nextpnr-xilinx, Project X-Ray's fasm2frames and xc7frames2bit; its reports, its FPGA view, Configure
++  Target Device with openFPGALoader.
++- **Cross-Check Implementation against Bitstream:** a 7-series build checked against its own bitstream decoded by
++  Project X-Ray's bit2fasm; Vivado's build against the open flow's when there are both.
++
++In detail:
++
++- **View Implemented Design of a Vivado build (#9000):** the step fpgaview of Vivado's flow runs implview export --detail
++  on build/post_route.dcp (server/implview.js); core/implview-model.js makes its design and device files the view's model
++  (the tiles on Vivado's grid, family-neutral; each LUT's equation from its INIT and pin map, minimised; the flip-flops'
++  INIT, set / reset and synchronous mode; the nets' ends on the sites' pins and the tiles of their routes). The program:
++  paths.implview of config.json, else the umbrella checkout's .venv/bin/implview, else PATH; its cache in build/implview.
++- **The open 7-series flow, openXC7 (#9000):** the synthesis tool openxc7 (set_design_properties, Design Properties) on a
++  7-series device runs server/openxc7.js in build/openxc7: Verilog read by Yosys (deferred), VHDL and drawings through the
++  Silinx front end as one flat module; the XDC as nextpnr-xilinx reads it (core/openxc7.js); the chip database of
++  openxc7.chipdbs / openxc7.chipdbDir and Project X-Ray's database of openxc7.prjxrayDb (config.json only); the
++  bitstream copied to build/<top>.bit for Configure Target Device; its view implview import-nextpnr's placement with
++  nextpnr's INITs and routes.
++- **Cross-Check (#9000):** the process under Place & Route and the MCP server's cross_check (server/crosscheck.js,
++  core/crosscheck-fasm.js): implview crosscheck of a Vivado build; an open build's bitstream decoded and compared bit by
++  bit with nextpnr's FASM (the features of no configuration bit explained by the database) and encoded again against
++  its frames; both builds side by side; UltraScale+ and Versal not cross-checkable (Vivado's own checks only). The MCP
++  server's fpga_view gives the view's model (the utilisation and modules, a site, a net).
+diff --git a/core/crosscheck-fasm.js b/core/crosscheck-fasm.js
+new file mode 100644
+index 0000000..62e3bd5
+--- /dev/null
++++ b/core/crosscheck-fasm.js
+@@ -0,0 +1,90 @@
++// Silinx - Cross-Check of an open 7-series build (#crosscheck, server/crosscheck.js): nextpnr-xilinx's FASM against the
++// FASM decoded back from the bitstream (Project X-Ray's bit2fasm), as sets of set bits. A multi-bit feature is its bits
++// (ALUT.INIT[63:0] = 64'b… -> ALUT.INIT[k] for each 1), so the two writers' ways of grouping them do not matter. What
++// only one side has is explained by the database: a feature of no configuration bit (a pseudo pip, ppips_*.db's
++// always / default / hint, or a segbits entry of cleared bits only, as PRECYINIT.C0) cannot be seen in a bitstream,
++// and bit2fasm decodes every unused slice's zero-bit defaults. Anything else is a mismatch.
++//
++//   fasmFeatures(text) -> Set     segbitsIndex(segbitsText, ppipsText) -> Map(key -> true (set bits) | false (none))
++//   compareFasm({ nextpnr, decoded, bitsOf }) -> { nextpnr, decoded, common, identical, onlyNextpnr, onlyDecoded, … }
++
++/** The set bits of a FASM text: 'TILE.FEATURE' or 'TILE.FEATURE[k]', its comments and cleared bits left out. */
++export function fasmFeatures(text) {
++  const out = new Set();
++  for (const raw of String(text || '').split(/\r?\n/)) {
++    const line = raw.replace(/#.*$/, '').trim();
++    if (!line) continue;
++    const m = /^([^\s=[]+)(?:\[(\d+)(?::(\d+))?\])?\s*(?:=\s*(\S+))?$/.exec(line);
++    if (!m) continue;
++    const [, name, hi, lo, value] = m;
++    if (value === undefined) { out.add(hi !== undefined && lo === undefined ? `${name}[${hi}]` : name); continue; }
++    const v = /^(\d+)'([bhd])([0-9a-fA-F_]+)$/.exec(value);
++    let bits;
++    try { bits = v ? BigInt(v[2] === 'b' ? `0b${v[3].replace(/_/g, '')}` : v[2] === 'h' ? `0x${v[3].replace(/_/g, '')}` : v[3]) : BigInt(value); }
++    catch { continue; }
++    if (hi === undefined) { if (bits) out.add(name); continue; }
++    const base = lo !== undefined ? +lo : +hi;
++    for (let k = 0; bits >> BigInt(k); k++) if ((bits >> BigInt(k)) & 1n) out.add(`${name}[${base + k}]`);
++  }
++  return out;
++}
++
++/** A tile's features in the database by their key (TILETYPE.FEATURE): true when it sets bits, false for a feature of
++ *  none (cleared bits only, or a pseudo pip). */
++export function segbitsIndex(segbitsText = '', ppipsText = '') {
++  const idx = new Map();
++  for (const line of String(segbitsText).split(/\r?\n/)) {
++    const w = line.trim().split(/\s+/);
++    if (!w[0]) continue;
++    idx.set(w[0], w.slice(1).some(b => /^\d+_\d+$/.test(b)));
++  }
++  for (const line of String(ppipsText).split(/\r?\n/)) {
++    const w = line.trim().split(/\s+/);
++    if (w[0] && !idx.has(w[0])) idx.set(w[0], false);
++  }
++  return idx;
++}
++
++/** A feature's database key: its tile's type (the tile's name without _X#Y#), then the feature. */
++export const featureKey = f => { const k = f.indexOf('.'); return k < 0 ? f : `${f.slice(0, k).replace(/_X\d+Y\d+$/, '')}${f.slice(k)}`; };
++export const tileTypeOf = f => f.slice(0, f.indexOf('.')).replace(/_X\d+Y\d+$/, '');
++
++/** nextpnr's FASM against the bitstream's: bitsOf(key) -> true | false | undefined (unknown). The build is consistent
++ *  when every difference is a feature of no bits (`identical`: no difference at all). Samples of each kind. */
++export function compareFasm({ nextpnr, decoded, bitsOf = () => undefined, samples = 10 }) {
++  const N = nextpnr instanceof Set ? nextpnr : fasmFeatures(nextpnr), D = decoded instanceof Set ? decoded : fasmFeatures(decoded);
++  const onlyN = [...N].filter(f => !D.has(f)).sort(), onlyD = [...D].filter(f => !N.has(f)).sort();
++  const noBits = f => bitsOf(featureKey(f.replace(/\[\d+\]$/, ''))) === false || bitsOf(featureKey(f)) === false;
++  const nZero = onlyN.filter(noBits), dZero = onlyD.filter(noBits);
++  // (bit2fasm decodes the defaults the bitstream writer sets on a site nextpnr does not use: an unused pad's IN_TERM,
++  // PULLTYPE, SLEW, STEPDOWN)
++  const site = f => f.split('.').slice(0, 2).join('.');
++  const usedSites = new Set([...N].map(site));
++  const nBad = onlyN.filter(f => !noBits(f)), dUnused = onlyD.filter(f => !noBits(f) && !usedSites.has(site(f))), dBad = onlyD.filter(f => !noBits(f) && usedSites.has(site(f)));
++  return {
++    nextpnr: N.size, decoded: D.size, common: N.size - onlyN.length,
++    identical: !onlyN.length && !onlyD.length,
++    consistent: !nBad.length && !dBad.length,
++    onlyNextpnr: { total: onlyN.length, noBits: nZero.length, unexplained: nBad.length, samples: nBad.slice(0, samples), noBitsSamples: nZero.slice(0, samples) },
++    onlyDecoded: { total: onlyD.length, noBits: dZero.length, unusedSites: dUnused.length, unusedSamples: dUnused.slice(0, samples), unexplained: dBad.length, samples: dBad.slice(0, samples), noBitsSamples: dZero.slice(0, samples) },
++  };
++}
++
++/** A structural comparison of two builds of the same design (Vivado's and the open flow's): their counts side by side
++ *  (from the models of the view: core/implview-model.js). */
++export function compareBuilds(vivado, open) {
++  const count = (m, f) => m.insts.reduce((a, i) => a + i.cells.filter(f).length, 0);
++  const rows = [
++    ['Slices', m => m.insts.filter(i => /^SLICE/.test(i.type)).length],
++    ['LUTs', m => count(m, c => c.kind === 'lut')],
++    ['Flip-flops', m => count(m, c => c.kind === 'ff' || c.kind === 'latch')],
++    ['Carry chains (CARRY4)', m => count(m, c => c.kind === 'carry')],
++    ['Block RAMs', m => count(m, c => c.kind === 'ramb')],
++    ['DSPs', m => count(m, c => c.kind === 'dsp')],
++    ['I/Os', m => m.insts.filter(i => i.io).length],
++    ['Global clock buffers', m => count(m, c => c.kind === 'bufg')],
++    ['Nets', m => m.nets.filter(n => n.kind !== 'power').length],
++    ['Routing switches (PIPs)', m => m.nets.reduce((a, n) => a + (n.pips || 0), 0)],
++  ];
++  return rows.map(([name, f]) => ({ name, vivado: f(vivado), open: f(open) }));
++}
+diff --git a/core/implview-model.js b/core/implview-model.js
+new file mode 100644
+index 0000000..ffe5de2
+--- /dev/null
++++ b/core/implview-model.js
+@@ -0,0 +1,313 @@
++// Silinx - View Implemented Design (FPGA) of a 7-series build that Silinx's own flow did not make: AMD Vivado's routed
++// checkpoint, exported by the implview tool (implview export --detail: its design file, <top>.ivd.gz, and the part's
++// device file, <part>.ivdev.gz, both gzip'ed tab-separated records), or the open 7-series flow's (openXC7: Yosys
++// synth_xilinx, nextpnr-xilinx) placement, imported by implview import-nextpnr and completed from nextpnr's own JSON
++// (the cells' INIT and ports, the nets' ROUTING). Both become the model web/js/fpgaview.js draws
++// (packages/silinx-fpga/src/xdl.js fpgaModel's: the device's tiles, the used sites with their cells and pins, the nets).
++// Family-neutral: the tiles come from the device file on Vivado's tile grid (any series), the sites by their type.
++//
++//   parseIvd(text) -> { info, cells, details, nets, pads, pips }    parseIvdev(text) -> { info, tiles, sites, pins }
++//   implviewModel(parseIvd(..), parseIvdev(..)) -> model            nextpnrModel(parseIvd(..), parseIvdev(..), json) -> model
++//   lutEquation(init, pinmap) -> { eq, inputs }                     (eq in XDL's syntax over the BEL's pins A1..A6)
++import { quineMcCluskey } from './qm.js';
++
++/** A LUT equation with its inputs' net names, as the view writes the XDL's ('A1*~A2' -> 'a · ¬b'). */
++const prettyEquation = (eq, inputs) => String(eq).replace(/\bA(\d)\b/g, (m, n) => inputs[`A${n}`] || m)
++  .replace(/~/g, '¬').replace(/\*/g, ' · ').replace(/\+/g, ' + ');
++const UNESC = { n: '\n', t: '\t', '\\': '\\' };
++const unesc = s => String(s).replace(/\\(.)/g, (m, c) => UNESC[c] ?? m);
++const rows = text => String(text).split('\n').filter(Boolean).map(l => l.split('\t'));
++
++/** An implview design file's records (the text of <top>.ivd.gz). Throws on another file. */
++export function parseIvd(text) {
++  const r = rows(text);
++  if (r[0]?.[0] !== '#implview-design') throw new Error('not an implview design file');
++  const d = { info: {}, cells: [], details: new Map(), nets: [], pads: [], pips: new Map() };
++  for (const x of r.slice(1)) {
++    const k = x[0];
++    if (k === 'U') d.cells.push({ site: x[1], bel: x[2], ref: x[3], group: x[4], name: x[5] });
++    else if (k === 'C') d.details.set(+x[1], Object.fromEntries(x.slice(2).filter(v => v.includes('=')).map(v => { const u = unesc(v), i = u.indexOf('='); return [u.slice(0, i), u.slice(i + 1)]; })));
++    else if (k === 'W') d.nets[+x[1]] = { name: x[2], type: x[3], fanout: +x[4], routed: +x[5], pins: [], segs: [], pips: [] };
++    else if (k === 'Q' && d.nets[+x[1]]) d.nets[+x[1]].pins = x.slice(2);
++    else if (k === 'G' && d.nets[+x[1]]) d.nets[+x[1]].segs = x.slice(2).filter(s => s.includes(' ')).map(s => s.split(' '));
++    else if (k === 'I' && d.nets[+x[1]]) d.nets[+x[1]].pips = x.slice(2);
++    else if (k === 'O') d.pads.push({ site: x[1], port: x[2], cell: x[3] });
++    else if (k === 'P') d.pips.set(x[1], +x[2]);
++    else if (/^[a-z]/.test(k)) d.info[k] = x[1] ?? '';
++  }
++  d.nets = d.nets.filter(Boolean);
++  return d;
++}
++
++/** An implview device file's records (the text of <part>.ivdev.gz): its tiles on the grid and their sites. */
++export function parseIvdev(text) {
++  const r = rows(text);
++  if (r[0]?.[0] !== '#implview-device') throw new Error('not an implview device file');
++  const d = { info: {}, tiles: [], sites: [], pins: new Map() };
++  for (const x of r.slice(1)) {
++    const k = x[0];
++    if (k === 'T') d.tiles.push({ name: x[1], type: x[2], gx: +x[3], gy: +x[4] });
++    else if (k === 'S') d.sites.push({ tile: +x[1], name: x[2], type: x[3], bonded: x[5] === '1' });
++    else if (k === 'K') d.pins.set(x[2], x[1]);
++    else if (/^[a-z]/.test(k)) d.info[k] = x[1] ?? '';
++  }
++  return d;
++}
++
++/** A LUT's function on its BEL's pins: Vivado's INIT (logical inputs I0..) and pin map ('I0:A5 I1:A2') -> its equation
++ *  in XDL's syntax ('A2*~A5'), minimised (Quine-McCluskey), and the BEL pins it uses. A constant: '0' or '1'. */
++export function lutEquation(init, pinmap) {
++  const m = /^(\d+)'([hb])([0-9a-fA-F_]+)$/.exec(String(init || '').trim());
++  if (!m) return null;
++  const bits = BigInt(m[2] === 'h' ? `0x${m[3].replace(/_/g, '')}` : `0b${m[3].replace(/_/g, '')}`);
++  const map = Object.fromEntries(String(pinmap || '').split(/\s+/).filter(Boolean).map(p => p.split(':')));
++  const logical = Object.keys(map).map(k => +k.slice(1)).sort((a, b) => a - b);
++  const phys = [...new Set(logical.map(i => map[`I${i}`]))].sort();
++  if (!phys.length) return { eq: bits & 1n ? '1' : '0', inputs: [] };
++  let col = '';
++  for (let r = 0; r < 1 << phys.length; r++) {
++    // row r: input j of the column (the most significant first) is phys[j]
++    const v = Object.fromEntries(phys.map((p, j) => [p, (r >> (phys.length - 1 - j)) & 1]));
++    let a = 0;
++    for (const i of logical) if (v[map[`I${i}`]]) a |= 1 << i;
++    col += (bits >> BigInt(a)) & 1n ? '1' : '0';
++  }
++  if (!col.includes('1')) return { eq: '0', inputs: phys };
++  if (!col.includes('0')) return { eq: '1', inputs: phys };
++  const q = quineMcCluskey(col, phys.length);
++  const term = t => phys.map((p, j) => { const b = 1 << (phys.length - 1 - j); return t.mask & b ? null : t.value & b ? p : `~${p}`; }).filter(Boolean).join('*');
++  return { eq: q.terms.map(term).join('+'), inputs: phys };
++}
++
++// ------------------------------------------------------------------ sites and their kinds
++const isSliceType = t => /^SLICE/.test(t);
++export const isIoType = t => /^(IOB\d*[MS]?|IOB|IPAD|OPAD|IBUF|DIFF[MS]I?|IOBM|IOBS|HPIOB\w*|HRIO\w*|HDIOB\w*|XPIOB\w*)$/.test(t);
++const kindOf = type => (isSliceType(type) ? 'Slices' : isIoType(type) ? 'IOBs' : /^RAMB/.test(type) ? 'Block RAMs'
++  : /^(DSP\w*|MULT\w*)$/.test(type) ? 'Multipliers / DSPs' : /^(BUFG\w*|BUFGCTRL|BUFGCE\w*)$/.test(type) ? 'Global clock buffers'
++    : /^(MMCM\w*|PLL\w*|DCM\w*|XPLL|DPLL)$/.test(type) ? 'DCMs / PLLs' : null);
++const dirOf = name => { const k = String(name).lastIndexOf('/'); return k < 0 ? '' : name.slice(0, k); };
++const letter = bel => (/^([A-H])/.exec(bel) || [])[1] || '';
++
++/** The site pin of a cell's pin, by its BEL (7-series and UltraScale names): a LUT's inputs the BEL's pins A1..A6 under
++ *  its letter (B6LUT A3 -> B3), its output the letter (O6) or the letter's MUX (O5); a flip-flop's clock CLK, enable CE,
++ *  set / reset SR, output the letter's Q; anything else BEL.PIN. */
++function sitePin(bel, pin, physical) {
++  const L = letter(bel);
++  if (/^[A-H][56]LUT$/.test(bel)) {
++    if (/^(I\d|A\d)$/.test(pin)) return `${L}${(physical || pin).replace(/^A/, '')}`;
++    return /5LUT$/.test(bel) || pin === 'O5' ? `${L}MUX` : L;
++  }
++  if (/^[A-H]5?FF2?$/.test(bel)) {
++    if (/^(C|CK|CLK)$/.test(pin)) return 'CLK';
++    if (pin === 'CE') return 'CE';
++    if (/^(R|S|CLR|PRE|SR)$/.test(pin)) return 'SR';
++    if (pin === 'Q') return /5FF/.test(bel) ? `${L}MUX` : `${L}Q`;
++    if (pin === 'D') return `${L}X`;
++  }
++  return `${bel}.${pin}`;
++}
++
++/** The model of the view from cells placed on sites and nets between their pins (both front ends' common part).
++ *  cells: [{ name, site, bel, ref, init?, pinmap?, eq?, ffInit?, iostandard? }]; nets: [{ name, clock, pins: [[cell, pin]]
++ *  (the driver first), tiles, pips }]. */
++function buildModel({ dev, part, top, source, tool, cells, nets, pads = [] }) {
++  const tileOf = dev.tiles, siteInfo = new Map(dev.sites.map(s => [s.name, s]));
++  // the grid: every tile but the empty ones (NULL); its rows and columns Vivado's (gy, gx)
++  const bySiteTile = new Map();
++  for (const s of dev.sites) (bySiteTile.get(s.tile) || bySiteTile.set(s.tile, []).get(s.tile)).push([s.name, s.type, s.bonded ? 1 : 0]);
++  const tiles = [];
++  let rowsN = 0, colsN = 0;
++  tileOf.forEach((t, k) => {
++    rowsN = Math.max(rowsN, t.gy + 1); colsN = Math.max(colsN, t.gx + 1);
++    if (t.type !== 'NULL') tiles.push([t.gy, t.gx, t.name, t.type, bySiteTile.get(k) || []]);
++  });
++  // a site per used site, its cells
++  const insts = [], siteIdx = new Map(), cellSite = [];
++  const portOf = new Map(pads.map(p => [p.site, p.port]));
++  cells.forEach((c, ci) => {
++    let k = siteIdx.get(c.site);
++    if (k === undefined) {
++      const s = siteInfo.get(c.site);
++      k = insts.length; siteIdx.set(c.site, k);
++      insts.push({ name: portOf.get(c.site) || c.name, type: s?.type || c.site.replace(/_X\d+Y\d+$/, ''), site: c.site, tile: s ? tileOf[s.tile].name : '', placed: true, module: '', cells: [], opt: {}, pins: {} });
++    }
++    cellSite[ci] = k;
++    const inst = insts[k];
++    const cell = { bel: c.bel, kind: cellKind(c), name: c.name, ref: c.ref };
++    if (cell.kind === 'lut') {
++      const r = c.eq != null ? { eq: c.eq } : lutEquation(c.init, c.pinmap);
++      if (r) { cell.eq = r.eq; cell.size = 6; } else cell.text = c.ref;
++      if (c.init) cell.init = c.init;
++    }
++    if (cell.kind === 'ff' || cell.kind === 'latch') {
++      if (c.ffInit != null) inst.opt[`${c.bel}_INIT_ATTR`] = c.ffInit ? 'INIT1' : 'INIT0';
++      inst.opt[`${c.bel}_SR_ATTR`] = /^(FDPE|FDSE|LDPE)$/.test(c.ref) ? 'SRHIGH' : 'SRLOW';
++      inst.opt.SYNC_ATTR = /^(FDRE|FDSE)$/.test(c.ref) ? 'SYNC' : 'ASYNC';
++    }
++    if (c.iostandard) inst.opt.IOSTANDARD = c.iostandard;
++    for (const [k2, v] of Object.entries(c.props || {})) inst.opt[k2] = v;
++    inst.cells.push(cell);
++  });
++  // the module of a site: the most common hierarchy path of its logic
++  for (const inst of insts) {
++    const count = new Map();
++    for (const c of inst.cells) if (/^(lut|ff|latch|carry|mux|ram|ramb|dsp)/.test(c.kind)) count.set(dirOf(c.name), (count.get(dirOf(c.name)) || 0) + 1);
++    if (count.size) inst.module = [...count.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0];
++  }
++  // the nets, between the sites' pins
++  const outNets = [];
++  for (const n of nets) {
++    const ends = [];
++    for (const [ci, pin] of n.pins) {
++      const c = cells[ci];
++      if (!c || cellSite[ci] === undefined) continue;
++      ends.push([cellSite[ci], sitePin(c.bel, pin, c.phys?.[pin])]);
++    }
++    if (!ends.length) continue;
++    const idx = outNets.length;
++    outNets.push({ name: n.name, kind: n.power ? 'power' : n.clock ? 'clock' : 'signal', driver: ends[0], loads: ends.slice(1), tiles: n.tiles, pips: n.pips });
++    for (const [k, p] of ends) insts[k].pins[p] = idx;
++  }
++  // the LUTs' inputs as net names, the I/Os
++  for (const inst of insts) {
++    for (const c of inst.cells) if (c.kind === 'lut' && c.eq != null) {
++      const ins = {};
++      const usedPins = new Set(String(c.eq).match(/A[1-6]/g) || []);
++      for (let a = 1; a <= 6; a++) { if (!usedPins.has(`A${a}`)) continue; const ni = inst.pins[`${letter(c.bel)}${a}`]; if (ni !== undefined) ins[`A${a}`] = outNets[ni].name; }
++      c.inputs = ins;
++      c.text = prettyEquation(c.eq, ins);
++    }
++    if (isIoType(inst.type)) {
++      const out = inst.cells.some(c => /OBUF|OUTBUF/.test(c.ref) || /OUTBUF/.test(c.bel)), inp = inst.cells.some(c => /IBUF|INBUF/.test(c.ref) || /INBUF/.test(c.bel));
++      inst.io = { pad: dev.pins.get(inst.site) || inst.site, dir: out && inp ? 'inout' : out ? 'out' : 'in', standard: inst.opt.IOSTANDARD || null, drive: inst.opt.DRIVE || null, slew: inst.opt.SLEW || null, pull: inst.opt.PULLTYPE || null };
++    }
++  }
++  const util = {};
++  for (const s of dev.sites) { const k = kindOf(s.type); if (k && (k !== 'IOBs' || s.bonded)) (util[k] ||= { used: 0, total: 0 }).total++; }
++  const modules = {};
++  for (const inst of insts) { const k = kindOf(inst.type); if (k && util[k]) util[k].used++; if (k) modules[inst.module] = (modules[inst.module] || 0) + 1; }
++  return {
++    source, tool,
++    design: { name: top, part },
++    device: { part: dev.info.part || part, family: dev.info.family || dev.info.architecture || '', rows: rowsN, cols: colsN, tiles },
++    insts, nets: outNets, util, modules,
++  };
++}
++
++function cellKind({ ref = '', bel = '', group = '' }) {
++  if (/^LUT\d|^LUT$/.test(ref) || group === 'LUT') return 'lut';
++  if (/^(SRL|RAM\d|RAM[SD]\d|CFGLUT)/.test(ref) || /^(SRL|LUTRAM|DMEM)$/.test(group)) return 'ram';
++  if (/^LD/.test(ref)) return 'latch';
++  if (/^FD/.test(ref) || group === 'FLOP_LATCH' || /FF2?$/.test(bel)) return 'ff';
++  if (/^CARRY/.test(ref)) return 'carry';
++  if (/^MUXF/.test(ref)) return 'mux';
++  if (/^RAMB/.test(ref)) return 'ramb';
++  if (/^DSP/.test(ref)) return 'dsp';
++  if (/^(IBUF|IBUFDS|IOBUF)/.test(ref) || /INBUF/.test(bel)) return 'inbuf';
++  if (/^(OBUF)/.test(ref) || /OUTBUF/.test(bel)) return 'outbuf';
++  if (/^BUFG/.test(ref)) return 'bufg';
++  if (/^(MMCM|PLL)/.test(ref)) return 'dcm';
++  return String(ref || bel).toLowerCase();
++}
++
++/** Vivado's routed design as implview exported it (--detail), on its part's device file. */
++export function implviewModel(ivd, ivdev) {
++  const cells = ivd.cells.map((c, i) => {
++    const d = ivd.details.get(i) || {};
++    const ff = /^(FD|LD)/.test(c.ref) && /^1'b([01])$/.exec(d.INIT || '');
++    const props = {};
++    for (const k of ['DRIVE', 'SLEW', 'PULLTYPE']) if (d[k]) props[k] = d[k];
++    const phys = d.PINMAP ? Object.fromEntries(d.PINMAP.split(/\s+/).map(p => p.split(':'))) : null;
++    return { ...c, init: d.INIT, pinmap: d.PINMAP, phys, ffInit: ff ? +ff[1] : null, iostandard: d.IOSTANDARD || null, props };
++  });
++  const tilesOf = n => [...new Set(n.segs.flat())];
++  const nets = ivd.nets.map(n => ({
++    name: n.name, clock: /CLOCK/.test(n.type), power: /^(POWER|GROUND)$/.test(n.type),
++    pins: n.pins.filter(p => !p.startsWith('@')).map(p => { const i = p.indexOf(':'); return [+p.slice(0, i), p.slice(i + 1)]; }),
++    tiles: tilesOf(n), pips: n.pips.length,
++  }));
++  return buildModel({ dev: ivdev, part: ivd.info.part || ivdev.info.part, top: ivd.info.top, source: 'vivado', tool: ivd.info.vivado ? `AMD Vivado ${ivd.info.vivado}` : 'AMD Vivado', cells, nets, pads: ivd.pads });
++}
++
++/** A Yosys / nextpnr name as a hierarchy path: 'u_uart.u_rx.state_q' -> 'u_uart/u_rx/state_q'; Yosys's own ($abc$…,
++ *  $auto$…) at the top. */
++export const nextpnrPath = name => (String(name).startsWith('$') ? String(name) : String(name).replace(/\\/g, '').split('.').join('/'));
++
++/** The open 7-series flow's design: implview import-nextpnr's placement, each cell's INIT and ports and each net's
++ *  route from nextpnr's JSON (--write). */
++export function nextpnrModel(ivd, ivdev, json) {
++  const mod = Object.values(json?.modules || {}).find(m => m.attributes?.top) || Object.values(json?.modules || {})[0] || { cells: {}, netnames: {} };
++  const bitNet = new Map();
++  const netList = [];
++  for (const [name, n] of Object.entries(mod.netnames || {})) {
++    if ((n.bits || []).length !== 1 || typeof n.bits[0] !== 'number' || bitNet.has(n.bits[0])) continue;
++    const routing = String(n.attributes?.ROUTING || '').split(';');
++    const tiles = new Set(); let pips = 0;
++    for (let k = 0; k + 2 < routing.length; k += 3) {
++      const w = /^([A-Z0-9_]+_X\d+Y\d+)\//.exec(routing[k]);
++      if (w && !/^SITEWIRE/.test(routing[k])) tiles.add(w[1]);
++      if (routing[k + 1] && !/^SITEPIP/.test(routing[k + 1])) pips++;
++    }
++    bitNet.set(n.bits[0], netList.length);
++    netList.push({ name: nextpnrPath(name), clock: false, power: /\$PACKER_(VCC|GND)/.test(name), pins: [], tiles: [...tiles], pips });
++  }
++  // (a bus's bits: their names, where a single-bit net of the bit has only Yosys's own)
++  for (const [name, n] of Object.entries(mod.netnames || {})) {
++    if ((n.bits || []).length < 2 || name.startsWith('$')) continue;
++    n.bits.forEach((b, i) => { const k = bitNet.get(b); if (k !== undefined && netList[k].name.startsWith('$')) netList[k].name = `${nextpnrPath(name)}[${i}]`; });
++  }
++  const cells = [];
++  const byName = new Map(ivd.cells.map(c => [c.name, c]));
++  for (const [cname, c] of Object.entries(mod.cells || {})) {
++    const u = byName.get(cname);
++    if (!u) continue;
++    const ref = c.attributes?.X_ORIG_TYPE || u.ref;
++    const ci = cells.length;
++    // (a Yosys cell's own name, $abc$…, says nothing: its hierarchy path from hdlname, else from its output's net)
++    const outNet = Object.entries(c.connections || {}).find(([p, b]) => (c.port_directions || {})[p] === 'output' && typeof b[0] === 'number' && bitNet.has(b[0]));
++    const named = c.attributes?.hdlname ? c.attributes.hdlname.split(' ').join('/') : !cname.startsWith('$') ? nextpnrPath(cname)
++      : outNet && !netList[bitNet.get(outNet[1][0])].name.startsWith('$') ? netList[bitNet.get(outNet[1][0])].name : cname;
++    const cell = { name: named, site: u.site, bel: u.bel, ref, group: u.group };
++    if (c.type === 'SLICE_LUTX') {
++      // nextpnr's INIT is on the BEL's pins already (A1..A6, the string's last character address 0)
++      const used = Object.entries(c.connections || {}).filter(([p, b]) => /^A\d$/.test(p) && b.length && typeof b[0] === 'number').map(([p]) => p);
++      const bits = String(c.parameters?.INIT || '0');
++      const pinmap = used.map(p => `I${+p[1] - 1}:${p}`).join(' ');
++      cell.init = `${bits.length}'b${bits}`; cell.pinmap = pinmap;
++      const full = `64'b${bits.padStart(64, '0')}`;
++      const all = Array.from({ length: 6 }, (_, k) => `I${k}:A${k + 1}`).join(' ');
++      const r = lutEquation(full, all);
++      // the function of the used pins only (an unconnected pin's value never reaches it)
++      cell.eq = r ? restrictEq(full, used) : null;
++    }
++    if (c.type === 'SLICE_FFX') { const v = String(c.parameters?.INIT ?? ''); cell.ffInit = /^[01]$/.test(v.slice(-1)) ? +v.slice(-1) : null; }
++    if (c.attributes?.IOSTANDARD) cell.iostandard = c.attributes.IOSTANDARD;
++    cells.push(cell);
++    const dirs = c.port_directions || {};
++    for (const [p, b] of Object.entries(c.connections || {})) {
++      if (!b.length || typeof b[0] !== 'number' || !bitNet.has(b[0])) continue;
++      const n = netList[bitNet.get(b[0])];
++      if (dirs[p] === 'output') n.pins.unshift([ci, p]); else n.pins.push([ci, p]);
++      if (/^(CK|CLK)$/.test(p) && c.type === 'SLICE_FFX') n.clockLoads = (n.clockLoads || 0) + 1;
++      if (/^BUFG/.test(c.type) && dirs[p] === 'output') n.clock = true;
++    }
++  }
++  for (const n of netList) if (n.clockLoads > 1 && !n.power) n.clock = true;
++  const part = ivd.info.part || ivdev.info.part;
++  return buildModel({ dev: ivdev, part, top: ivd.info.top, source: 'openxc7', tool: ivd.info.nextpnr || 'nextpnr-xilinx', cells, nets: netList });
++}
++
++/** A 64-bit LUT INIT (on A1..A6) restricted to its connected pins, the others 0: its equation. */
++function restrictEq(full, used) {
++  if (!used.length) return /1$/.test(full) ? '1' : '0';
++  const pinmap = used.map((p, k) => `I${k}:${p}`).join(' ');
++  // the logical table over the used pins: row a of the used pins -> the 64-bit address with the others 0
++  const b = BigInt(`0b${full.slice(4)}`);
++  let bits = 0n;
++  for (let a = 0; a < 1 << used.length; a++) {
++    let addr = 0;
++    used.forEach((p, k) => { if (a >> k & 1) addr |= 1 << (+p[1] - 1); });
++    if ((b >> BigInt(addr)) & 1n) bits |= 1n << BigInt(a);
++  }
++  return lutEquation(`${1 << used.length}'h${bits.toString(16)}`, pinmap)?.eq ?? null;
++}
+diff --git a/core/openxc7.js b/core/openxc7.js
+new file mode 100644
+index 0000000..10f08fc
+--- /dev/null
++++ b/core/openxc7.js
+@@ -0,0 +1,117 @@
++// Silinx - the open 7-series flow of the native tools (openXC7: Yosys synth_xilinx, nextpnr-xilinx, Project X-Ray's
++// fasm2frames and xc7frames2bit; server/openxc7.js runs them, #openxc7): what needs no program, kept apart to be tested
++// alone. The project's XDC as nextpnr-xilinx reads it, its clock's frequency, the part's names in the tools' databases,
++// nextpnr's log as the Design Summary's reports, and which families can be cross-checked against an open bitstream
++// database (core/crosscheck-fasm.js compares the features).
++//
++//   nextpnrXdc(xdcText) -> { text, freqMHz, ports, dropped }      nextpnrReports(logText) -> { utilization, timing, routed }
++//   prjxrayFamily(part) -> 'spartan7' | …                          crossCheckability(device) -> { open, reason }
++
++/** The family folder of a part in Project X-Ray's database (prjxray-db/<family>/<part>). */
++export function prjxrayFamily(part) {
++  const p = String(part || '').toLowerCase();
++  return /^xc7a/.test(p) ? 'artix7' : /^xc7s/.test(p) ? 'spartan7' : /^xc7z/.test(p) ? 'zynq7' : /^xc7k/.test(p) ? 'kintex7' : null;
++}
++
++/** The database's names to try for a full part name (xc7a35ticsg324-1l: the industrial and low-power grades share the
++ *  commercial fabric, xc7a35tcsg324-1). */
++export function prjxrayParts(fullPart) {
++  const p = String(fullPart || '').toLowerCase();
++  const m = /^(xc7[askz]\d+t?)(i?)([a-z]+\d+)-(\w+)$/.exec(p);
++  if (!m) return [p];
++  return [...new Set([p, `${m[1]}${m[3]}-${m[4]}`, `${m[1]}${m[3]}-1`])];
++}
++
++/** Can a device's build be decoded from its bitstream by an open database? The 7-series: Project X-Ray. UltraScale+:
++ *  Project U-Ray's database is partial; Versal: none. { open, family, reason }. */
++export function crossCheckability(device) {
++  const part = String(device?.part || device || '').toLowerCase();
++  if (/^xc7[askz]/.test(part)) return { open: true, family: '7-series', reason: 'Project X-Ray database (bit2fasm)' };
++  if (/^(xcvc|xcvm|xcve|xcvp|xcvh|xqvc|xqvm)/.test(part)) return { open: false, family: 'Versal', reason: 'no open bitstream database (Versal): not cross-checkable; Vivado-internal checks only (report_route_status, ROUTE vs get_nodes)' };
++  if (/^(xc[kvz]u\d+p|xczu|xcau|xcku\d+p|xcvu\d+p|xqzu)/.test(part)) return { open: false, family: 'UltraScale+', reason: 'prjuray partial (UltraScale+): not cross-checkable; Vivado-internal checks only (report_route_status, ROUTE vs get_nodes)' };
++  if (/^(xcku|xcvu)\d/.test(part)) return { open: false, family: 'UltraScale', reason: 'no open bitstream database (UltraScale): not cross-checkable; Vivado-internal checks only (report_route_status, ROUTE vs get_nodes)' };
++  return { open: false, family: 'unknown', reason: `${part || 'the device'}: no open bitstream database known` };
++}
++
++// one Tcl command's words: braces and brackets kept whole
++function words(line) {
++  const out = [];
++  let i = 0;
++  while (i < line.length) {
++    if (/\s/.test(line[i])) { i++; continue; }
++    const open = line[i], close = { '{': '}', '[': ']', '"': '"' }[open];
++    if (close) {
++      let depth = 0, j = i;
++      for (; j < line.length; j++) {
++        if (line[j] === open && open !== '"') depth++;
++        else if (line[j] === close) { if (open === '"' && j > i) break; if (--depth === 0) break; }
++      }
++      out.push(line.slice(i, j + 1)); i = j + 1;
++    } else { const j = line.slice(i).search(/\s/); out.push(j < 0 ? line.slice(i) : line.slice(i, i + j)); i = j < 0 ? line.length : i + j; }
++  }
++  return out;
++}
++const portsOf = w => { const m = /^\[\s*get_ports\s+(.*?)\s*\]$/.exec(w || ''); return m ? words(m[1].replace(/^\{\s*|\s*\}$/g, '')).map(p => p.replace(/^[{"]|[}"]$/g, '')) : null; };
++
++/** The XDC as nextpnr-xilinx reads it (set_property NAME VALUE [get_ports port], one per line: no -dict, no braces around
++ *  a single port), the frequency of its first clock (create_clock -period, MHz) and what it leaves out. */
++export function nextpnrXdc(xdcText) {
++  const out = [], dropped = [], ports = new Set();
++  let freqMHz = null;
++  const text = String(xdcText || '').replace(/\\\r?\n/g, ' ');
++  for (const raw of text.split(/\r?\n/)) {
++    const line = raw.replace(/(^|;)\s*#.*$/, '').trim();
++    if (!line) continue;
++    const w = words(line);
++    if (w[0] === 'set_property' && w[1] === '-dict') {
++      const kv = words(w[2].replace(/^\{|\}$/g, '')), ps = portsOf(w[3]);
++      if (!ps) { dropped.push(raw.trim()); continue; }
++      for (let k = 0; k + 1 < kv.length; k += 2) for (const p of ps) { out.push(`set_property ${kv[k]} ${kv[k + 1]} [get_ports {${p}}]`); ports.add(p); }
++    } else if (w[0] === 'set_property' && w.length >= 4) {
++      const ps = portsOf(w[3]);
++      if (!ps) { dropped.push(raw.trim()); continue; }
++      for (const p of ps) { out.push(`set_property ${w[1]} ${w[2]} [get_ports {${p}}]`); ports.add(p); }
++    } else if (w[0] === 'create_clock') {
++      const k = w.indexOf('-period');
++      if (k >= 0 && freqMHz === null && +w[k + 1] > 0) freqMHz = +(1000 / +w[k + 1]).toFixed(3);
++    } else dropped.push(raw.trim());
++  }
++  return { text: out.join('\n') + (out.length ? '\n' : ''), freqMHz, ports: [...ports], dropped };
++}
++
++/** nextpnr-xilinx's log as reports: its utilisation ([{ name, used, total, percent }]), its timing ({ met, maxFreqMHz,
++ *  clocks: [{ clock, maxFreqMHz, targetMHz, pass }] }) and whether it routed every net. */
++export function nextpnrReports(logText) {
++  const utilization = [], clocks = [];
++  let inUtil = false;
++  for (const line of String(logText || '').split(/\r?\n/)) {
++    if (/Device utilisation:/.test(line)) { inUtil = true; utilization.length = 0; continue; }
++    if (inUtil) {
++      const m = /^Info:\s+(\S+):\s+(\d+)\/\s*(\d+)\s+(\d+)%/.exec(line);
++      if (m) { utilization.push({ name: m[1], used: +m[2], total: +m[3], percent: +m[4] }); continue; }
++      if (!/^Info:\s*$/.test(line)) inUtil = false;
++    }
++    const f = /Max frequency for clock\s+'([^']+)':\s+([\d.]+) MHz \((PASS|FAIL) at ([\d.]+) MHz\)/.exec(line);
++    if (f) {
++      const c = { clock: f[1], maxFreqMHz: +f[2], targetMHz: +f[4], pass: f[3] === 'PASS' };
++      const k = clocks.findIndex(x => x.clock === c.clock);
++      if (k >= 0) clocks[k] = c; else clocks.push(c);   // (the last estimate: after routing)
++    }
++  }
++  const log = String(logText || '');
++  const routed = /Routing complete\.|Router2 time|Program finished normally\./.test(log) && !/ERROR:/.test(log);
++  const worst = clocks.length ? clocks.reduce((a, b) => (b.maxFreqMHz < a.maxFreqMHz ? b : a)) : null;
++  return {
++    utilization: utilization.filter(u => u.used > 0 || /^(SLICE_LUTX|SLICE_FFX|IOB33|RAMB|DSP|BUFGCTRL)/.test(u.name)),
++    timing: { met: clocks.length ? clocks.every(c => c.pass) : null, timingErrors: clocks.filter(c => !c.pass).length, maxFreqMHz: worst?.maxFreqMHz ?? null, minPeriodNs: worst ? +(1000 / worst.maxFreqMHz).toFixed(3) : null, clocks, model: "nextpnr-xilinx's estimate" },
++    routed,
++  };
++}
++
++/** The Design Summary's headline counts of nextpnr's utilisation (as Vivado's: LUTs, FFs, IOBs, BRAM, DSP, BUFG). */
++export function nextpnrSummary(utilization) {
++  const pick = re => { const u = utilization.filter(x => re.test(x.name)); return u.length ? { used: u.reduce((a, x) => a + x.used, 0), total: u.reduce((a, x) => a + x.total, 0), percent: null } : null; };
++  const out = { luts: pick(/^SLICE_LUTX$/), ffs: pick(/^SLICE_FFX$/), iobs: pick(/^PAD$/), bram: pick(/^RAMB(18|36)E1$/), dsp: pick(/^DSP48E1$/), bufg: pick(/^BUFGCTRL$/), carry: pick(/^CARRY4$/) };
++  for (const v of Object.values(out)) if (v?.total) v.percent = +(100 * v.used / v.total).toFixed(2);
++  return out;
++}
+diff --git a/server/crosscheck.js b/server/crosscheck.js
+new file mode 100644
+index 0000000..de94166
+--- /dev/null
++++ b/server/crosscheck.js
+@@ -0,0 +1,143 @@
++// Cross-Check (#crosscheck; the process and the MCP server's cross_check): a 7-series build checked against its own
++// bitstream, decoded by an independent tool (Project X-Ray's bit2fasm), and the two implementations compared.
++//   - AMD Vivado's build: implview crosscheck of build/post_route.dcp (server/implview.js) - the used slices, LUT and FF
++//     BELs, each LUT's physical INIT, the flip-flops' INIT / reset and the slices' CE / SR / FFSYNC / LATCH / CLKINV, the
++//     pips - and Vivado's own checks (report_route_status, each net's ROUTE against get_nodes);
++//   - the open flow's (openXC7, server/openxc7.js): its bitstream decoded by bit2fasm against nextpnr's FASM
++//     (core/crosscheck-fasm.js), and the decoded FASM encoded again (fasm2frames) against the build's frames;
++//   - both: the two builds side by side (compareBuilds).
++// UltraScale+ and Versal: no open bitstream database (core/openxc7.js crossCheckability): Vivado's own checks only.
++// Writes build/crosscheck.json and build/crosscheck.txt (the report the console and the Design Summary show).
++import fs from 'node:fs/promises';
++import fss from 'node:fs';
++import path from 'node:path';
++import { loadConfig } from './toolchain.js';
++import { runCommand, capture } from './jobs.js';
++import { vivadoPart } from './vivado.js';
++import { runImplview, implviewViewModel, exportVivadoView } from './implview.js';
++import { openXc7Status } from './openxc7.js';
++import { crossCheckability } from '../core/openxc7.js';
++import { fasmFeatures, segbitsIndex, tileTypeOf, compareFasm, compareBuilds } from '../core/crosscheck-fasm.js';
++
++const mtime = p => { try { return fss.statSync(p).mtimeMs; } catch { return 0; } };
++
++/** Which builds of a project's build folder can be cross-checked: { vivado, openxc7 }. */
++export function buildsOf(buildDir, top) {
++  return {
++    vivado: !!mtime(path.join(buildDir, 'post_route.dcp')),
++    openxc7: !!mtime(path.join(buildDir, 'openxc7', 'routed.fasm')) && !!mtime(path.join(buildDir, 'openxc7', `${top}.bit`)),
++  };
++}
++
++/** The database's features of the tile types of some features: key -> sets bits (core/crosscheck-fasm.js segbitsIndex). */
++async function dbIndex(dbRoot, features) {
++  const idx = new Map();
++  for (const t of new Set([...features].map(tileTypeOf))) {
++    const read = async k => fs.readFile(path.join(dbRoot, `${k}_${t.toLowerCase()}.db`), 'utf8').catch(() => '');
++    for (const [k, v] of segbitsIndex(await read('segbits'), await read('ppips'))) idx.set(k, v);
++  }
++  return idx;
++}
++
++const frameLines = t => String(t).split(/\r?\n/).map(l => l.trim()).filter(Boolean).sort();
++
++/** The open flow's build against its bitstream. */
++async function crossCheckOpenXc7(job, { buildDir, top, part, cfg }) {
++  const st = openXc7Status(cfg, part);
++  if (!st.tools.bit2fasm) throw new Error(`bit2fasm not found (paths.bit2fasm or PATH). ${st.help}`);
++  if (!st.db) throw new Error(`no Project X-Ray database of ${part} (openxc7.prjxrayDb)`);
++  const out = path.join(buildDir, 'openxc7');
++  const run = async (name, args) => { const code = await runCommand(job, st.tools[name], args, { cwd: out }); if (code !== 0) throw new Error(`${name} failed (exit code ${code})`); };
++  // bit2fasm writes the FASM on its standard output: kept in decoded.fasm, not in the log
++  job.log(`$ bit2fasm --db-root ${st.db.root} --part ${st.db.part} ${top}.bit > decoded.fasm`);
++  const dec = await capture(st.tools.bit2fasm, ['--db-root', st.db.root, '--part', st.db.part, `${top}.bit`], { cwd: out, timeoutMs: 600000 });
++  if (dec.code !== 0) throw new Error(`bit2fasm failed (exit code ${dec.code})`);
++  const lines = String(dec.out).split(/\r?\n/).filter(l => /^[A-Z0-9_]+_X\d+Y\d+\.\S/.test(l));   // (its warnings on the same stream left out)
++  await fs.writeFile(path.join(out, 'decoded.fasm'), lines.join('\n') + '\n');
++  const N = fasmFeatures(await fs.readFile(path.join(out, 'routed.fasm'), 'utf8')), D = fasmFeatures(lines.join('\n'));
++  const idx = await dbIndex(st.db.root, new Set([...N, ...D]));
++  const fasm = compareFasm({ nextpnr: N, decoded: D, bitsOf: k => idx.get(k) });
++  await run('fasm2frames', ['--db-root', st.db.root, '--part', st.db.part, 'decoded.fasm', 'decoded.frames']);
++  const a = frameLines(await fs.readFile(path.join(out, 'frames'), 'utf8')), b = frameLines(await fs.readFile(path.join(out, 'decoded.frames'), 'utf8'));
++  const framesIdentical = a.length === b.length && a.every((x, k) => x === b[k]);
++  return { fasm, frames: { identical: framesIdentical, built: a.length, decoded: b.length }, db: `${path.basename(st.db.root)}/${st.db.part}` };
++}
++
++/** Vivado's build: implview crosscheck (its JSON report), with the open flow's build when there is one. */
++async function crossCheckVivado(job, { buildDir, top, part, cfg, withOpen }) {
++  const args = ['crosscheck', 'post_route.dcp', '-O', path.join('implview', 'crosscheck')];
++  const bit = path.join(buildDir, `${top}.bit`);
++  // (the build's bitstream when it is Vivado's own and newer than the checkpoint; else Vivado writes one)
++  // (not the open flow's, which its bitgen copies there)
++  const openBit = path.join(buildDir, 'openxc7', `${top}.bit`);
++  const sameAsOpen = () => { try { return fss.readFileSync(bit).equals(fss.readFileSync(openBit)); } catch { return false; } };
++  if (mtime(bit) > mtime(path.join(buildDir, 'post_route.dcp')) && !sameAsOpen()) args.push('--bit', `${top}.bit`);
++  // (Project X-Ray's database of Toolchain Settings when it has the part's family; else implview finds one)
++  const { prjxrayFamily } = await import('../core/openxc7.js');
++  const fam = prjxrayFamily(part);
++  if (cfg.openxc7?.prjxrayDb && fam && fss.existsSync(path.join(cfg.openxc7.prjxrayDb, fam))) args.push('--db-root', cfg.openxc7.prjxrayDb);
++  if (withOpen) args.push('--nextpnr', path.join('openxc7', 'routed.json'), '--nextpnr-fasm', path.join('openxc7', 'routed.fasm'));
++  const env = cfg.paths?.bit2fasm ? { IMPLVIEW_BIT2FASM: cfg.paths.bit2fasm } : {};
++  await runImplview(job, args, { buildDir, cfg, env });
++  return JSON.parse(await fs.readFile(path.join(buildDir, 'implview', 'crosscheck', 'crosscheck.json'), 'utf8'));
++}
++
++/** Cross-Check of a project's builds: { family, checkable, vivado?, openxc7?, comparison?, text }. */
++export async function crossCheckProject(job, { project, projectDir }) {
++  const buildDir = path.join(projectDir, 'build'), top = project.top;
++  const part = vivadoPart(project.device);
++  const cfg = await loadConfig();
++  const can = crossCheckability(part);
++  const builds = buildsOf(buildDir, top);
++  if (!builds.vivado && !builds.openxc7) throw Object.assign(new Error('nothing to cross-check: implement the design first (AMD Vivado, or the open 7-series flow up to Generate Programming File)'), { status: 400 });
++  job.log(`Cross-Check of ${project.name} (${part}): ${[builds.vivado && 'AMD Vivado', builds.openxc7 && 'open 7-series flow (openXC7)'].filter(Boolean).join(' and ')}`);
++  if (!can.open) job.log(`INFO: ${can.family}: ${can.reason}`);
++  const r = { part, family: can.family, checkable: can.open, reason: can.reason };
++  if (builds.vivado) r.vivado = await crossCheckVivado(job, { buildDir, top, part, cfg, withOpen: builds.openxc7 && can.open });
++  if (builds.openxc7 && can.open) r.openxc7 = await crossCheckOpenXc7(job, { buildDir, top, part, cfg });
++  if (builds.vivado && builds.openxc7) {
++    try {
++      if (!fss.existsSync(path.join(buildDir, 'implview', `${top}.ivd.gz`)) || mtime(path.join(buildDir, 'implview', `${top}.ivd.gz`)) < mtime(path.join(buildDir, 'post_route.dcp'))) await exportVivadoView(job, { buildDir, top, cfg });
++      const v = await implviewViewModel(buildDir, top, { source: 'vivado' }), o = await implviewViewModel(buildDir, top, { source: 'openxc7' });
++      if (v.available && o.available) r.comparison = compareBuilds(v, o);
++    } catch (e) { job.log(`WARNING: the two builds could not be compared: ${e.message}`); }
++  }
++  r.text = crossCheckText(r);
++  await fs.writeFile(path.join(buildDir, 'crosscheck.json'), JSON.stringify(r, null, 2) + '\n');
++  await fs.writeFile(path.join(buildDir, 'crosscheck.txt'), r.text + '\n');
++  for (const l of r.text.split('\n')) job.log(l);
++  return r;
++}
++
++const pct = v => (v == null ? '—' : `${v} %`);
++/** The report's text: one line per check. */
++export function crossCheckText(r) {
++  const L = [`Cross-Check (${r.part}, ${r.family})`];
++  if (!r.checkable) L.push(`  ${r.reason}`);
++  const v = r.vivado;
++  if (v) {
++    L.push('AMD Vivado: the routed design against its bitstream (implview crosscheck, Project X-Ray bit2fasm)');
++    if (v.sites) {
++      L.push(`  Used slices: ${v.sites.slices_fasm} of ${v.sites.slices_vivado} (${pct(v.sites.slices_match_pct)})`);
++      L.push(`  LUT BELs found: ${v.sites.lut_bels_vivado} (${pct(v.sites.lut_bels_found_pct)}); FF BELs: ${v.sites.ff_bels_vivado} (${pct(v.sites.ff_bels_match_pct)})`);
++    }
++    if (v.lut_init) L.push(`  LUT physical INIT: ${v.lut_init.match} of ${v.lut_init.compared} (${pct(v.lut_init.match_pct)})`);
++    if (v.ff) L.push(`  FF INIT / reset: ${v.ff.ffs} (${pct(v.ff.init_reset_match_pct)})${Object.entries(v.ff.slice_controls || {}).map(([k, c]) => `; ${k} ${pct(c.match_pct ?? c.pct)}`).join('')}`);
++    if (v.pips) L.push(`  PIPs: ${v.pips.match} of ${v.pips.vivado_pips_with_bits} Vivado pips found in the bitstream (${pct(v.pips.vivado_found_in_fasm_pct)}); bitstream pips explained by Vivado ${pct(v.pips.fasm_explained_by_vivado_pct)} (${pct(v.pips.fasm_explained_excl_defaults_pct)} without unused-mux defaults)`);
++    if (v.vivado) L.push(`  Vivado: report_route_status errors ${v.vivado.route_status_errors}; ROUTE vs get_nodes: ${v.vivado.route_vs_nodes_nets} nets, ${pct(v.vivado.route_vs_nodes_agree_pct)}`);
++  }
++  const o = r.openxc7;
++  if (o) {
++    L.push(`Open 7-series flow (openXC7): the bitstream decoded (bit2fasm, ${o.db}) against nextpnr's FASM`);
++    L.push(`  Set bits: nextpnr ${o.fasm.nextpnr}, bitstream ${o.fasm.decoded}, common ${o.fasm.common}: ${o.fasm.identical ? 'identical' : o.fasm.consistent ? 'identical on every feature with configuration bits' : 'MISMATCH'}`);
++    L.push(`  Only in nextpnr's FASM: ${o.fasm.onlyNextpnr.total} (${o.fasm.onlyNextpnr.noBits} of no configuration bit: pseudo pips; ${o.fasm.onlyNextpnr.unexplained} unexplained)`);
++    L.push(`  Only in the bitstream: ${o.fasm.onlyDecoded.total} (${o.fasm.onlyDecoded.noBits} zero-bit defaults, ${o.fasm.onlyDecoded.unusedSites} defaults of unused sites; ${o.fasm.onlyDecoded.unexplained} unexplained)`);
++    for (const s of [...o.fasm.onlyNextpnr.samples, ...o.fasm.onlyDecoded.samples]) L.push(`    ${s}`);
++    L.push(`  Frames: the decoded FASM encoded again ${o.frames.identical ? 'gives the same' : 'DIFFERS from the'} ${o.frames.built} frames`);
++  }
++  if (r.comparison) {
++    L.push('AMD Vivado against the open flow (the same sources, independent synthesis and place and route):');
++    for (const c of r.comparison) L.push(`  ${c.name}: Vivado ${c.vivado}, open flow ${c.open}`);
++  }
++  return L.join('\n');
++}
+diff --git a/server/impl-routes.js b/server/impl-routes.js
+index 4b906a0..e9c0c08 100644
+--- a/server/impl-routes.js
++++ b/server/impl-routes.js
+@@ -127,11 +127,21 @@ export async function startImplementation(name, body = {}) {
+   // the Silinx toolchain (mode 'silinx'): no ISE, Silinx's own flow (server/open-flow.js). The
+   // request's toolchain, else the project's synthesis tool (synthTool: 'silinx' | 'xst'), else the
+   // execution mode of Toolchain Settings
+-  const choice = body.toolchain || ({ silinx: 'silinx', xst: 'ise', vivado: 'vivado' })[project.synthTool];
++  const choice = body.toolchain || ({ silinx: 'silinx', xst: 'ise', vivado: 'vivado', openxc7: 'openxc7' })[project.synthTool];
+   // (a 7-series device: Vivado's, #1649, unless the Silinx toolchain is asked for or is the project's synthesis tool: its
+   // 7-series back end, on trial, #3146; a toolchain asked for Vivado: its)
+   // (a Vivado-only family's, #3895: the Spartan-7, the Kintex-7, the Zynq-7000: Vivado's whatever the project's synthesis tool;
+   // the Silinx toolchain or ISE asked for: an error)
++  // (the open 7-series flow of the native tools, openXC7, #openxc7: any 7-series device, its own build folder build/openxc7)
++  if (choice === 'openxc7') {
++    if (!isVivadoDevice(project.device)) throw bad(`the open 7-series flow (openXC7) implements the 7-series devices, not the ${String(project.device?.part || '').toUpperCase()}`);
++    const { runOpenXc7, openXc7Steps } = await import('./openxc7.js');
++    try { steps = openXc7Steps(body.steps?.length ? steps.filter(x => x !== 'prombit') : []); } catch (e) { throw bad(e.message); }
++    if (!isTrusted(project)) throw bad(untrustedMessage(name, 'the openXC7 tools', project), 403);
++    const job = createJob('implement', j => runOpenXc7(j, { project, projectDir, steps }), { meta: { project: name, steps, toolchain: 'openxc7' } });
++    implJobs.set(key, job.id);
++    return job;
++  }
+   const only = isVivadoDevice(project.device) && !openFlowDevice(project.device);
+   if (only && ['silinx', 'open'].includes(body.toolchain)) throw bad(noOpenFlowMessage(project.device));
+   if (only && body.toolchain === 'ise') throw bad(`Xilinx ISE does not implement the ${String(project.device.part).toUpperCase()} here (${familyName(deviceFamily(project.device))}): AMD Vivado does (toolchain: 'vivado')`);
+@@ -159,6 +169,25 @@ export async function startImplementation(name, body = {}) {
+   return job;
+ }
+ 
++/** Start a Cross-Check of a project's 7-series builds (POST /projects/:p/crosscheck; the MCP server's cross_check). */
++export async function startCrossCheck(name) {
++  const P = Projects;
++  const bad = (msg, status = 400) => new P.HttpError(status, msg);
++  const project = await P.readProject(name);
++  if (!topOf(project)) throw bad('set the top module of the project before cross-checking');
++  if (!isVivadoDevice(project.device)) throw bad(`Cross-Check is for the 7-series builds (AMD Vivado, the open 7-series flow), not the ${String(project.device?.part || '').toUpperCase()}`);
++  if (!isTrusted(project)) throw bad(untrustedMessage(name, 'Cross-Check', project), 403);
++  const key = name.toLowerCase();
++  const running = implJobs.get(key);
++  if (running && getJob(running)?.status === 'running') throw bad(`an implementation of '${name}' is running (job ${running}); wait for it`, 409);
++  const { crossCheckProject, buildsOf } = await import('./crosscheck.js');
++  const b = buildsOf(path.join(P.projectDir(name), 'build'), project.top);
++  if (!b.vivado && !b.openxc7) throw bad('nothing to cross-check: implement the design first (AMD Vivado, or the open 7-series flow up to Generate Programming File)');
++  const job = createJob('crosscheck', j => crossCheckProject(j, { project, projectDir: P.projectDir(name) }), { meta: { project: name } });
++  implJobs.set(key, job.id);
++  return job;
++}
++
+ // the logic analyzer's capture (#3176) is inserted by the Silinx toolchain only: its wrapper reads the probes through
+ // hierarchical names, which XST and Vivado's synthesis do not take
+ export const CAPTURE_LEFT_OUT = tool => `WARNING:Silinx - the logic analyzer's capture is inserted by the Silinx toolchain only: ${tool} implements the design without it.`;
+@@ -246,6 +275,11 @@ export function registerImplRoutes(api, { wrap, projects: P }) {
+     const mtime = p => { try { return fss.statSync(p).mtimeMs; } catch { return 0; } };
+     const { MODEL_VERSION } = await import('../packages/silinx-fpga/src/parts.js');
+     const ncd = mtime(f(`${project.top}.ncd`)), xdl = mtime(f(`${project.top}.xdl`)), dev = mtime(f('device.xdlrc'));
++    // (a 7-series build of AMD Vivado or of the open flow of the native tools, openXC7: implview's, server/implview.js, #implview)
++    if (isVivadoDevice(project.device) && (project.synthTool === 'openxc7' || fss.existsSync(f('post_route.dcp')))) {
++      const { implviewViewModel } = await import('./implview.js');
++      return implviewViewModel(dir, project.top, { source: project.synthTool === 'openxc7' ? 'openxc7' : 'vivado' });
++    }
+     const openXdl = mtime(f('open/routed.xdl'));
+     if (openXdl && openXdl >= ncd) {
+       const st = openStatus(project.device || {});
+@@ -267,6 +301,9 @@ export function registerImplRoutes(api, { wrap, projects: P }) {
+     return model;
+   }));
+ 
++  // Cross-Check (server/crosscheck.js, #crosscheck): a job, its lines the run's, its result the report
++  api.post('/projects/:p/crosscheck', wrap(async req => ({ job: (await startCrossCheck(req.params.p)).id })));
++
+   api.get('/projects/:p/bitinfo', wrap(async req => {
+     const project = await P.readProject(req.params.p);
+     if (!topOf(project)) return { available: false, reason: 'no top module' };
+diff --git a/server/implview.js b/server/implview.js
+new file mode 100644
+index 0000000..49e6769
+--- /dev/null
++++ b/server/implview.js
+@@ -0,0 +1,106 @@
++// The implview tool (fpga-design-implview, MIT, run as a program of its own: never part of Silinx) for a 7-series build
++// that Silinx's own flow did not make (#implview): View Implemented Design (FPGA) of AMD Vivado's routed checkpoint
++// (implview export --detail) and of the open 7-series flow's result (implview import-nextpnr, server/openxc7.js), and
++// Cross-Check (implview crosscheck, server/crosscheck.js).
++//
++// The program: Toolchain Settings' paths.implview (config.json only, as every program's path), else the umbrella
++// checkout's (<silinx>/../.venv/bin/implview), else implview on PATH. Its cache (the part's device file, the design
++// files) is the build folder's, build/implview/cache (IMPLVIEW_CACHE): nothing is written outside the project. Vivado
++// is the local one of Toolchain Settings (vivado.settings: its bin/vivado), as IMPLVIEW_VIVADO.
++import fs from 'node:fs/promises';
++import fss from 'node:fs';
++import path from 'node:path';
++import zlib from 'node:zlib';
++import { fileURLToPath } from 'node:url';
++import { loadConfig, resolveTool } from './toolchain.js';
++import { runCommand } from './jobs.js';
++import { parseIvd, parseIvdev, implviewModel, nextpnrModel } from '../core/implview-model.js';
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
++/** The model's format: a new one rebuilds build/implview/fpga-view.json. */
++const IMPLVIEW_MODEL_VERSION = 1;
++
++const IMPLVIEW_HELP = 'Install fpga-design-implview (pip install fpga-design-implview, or the umbrella checkout\'s setup: <silinx>/../.venv/bin/implview) or set "paths": {"implview": "/path/to/implview"} in ~/.silinx/config.json.';
++
++/** The implview program: { path, found, reason }. */
++export function implviewTool(cfg, { root = ROOT } = {}) {
++  if (cfg?.paths?.implview) {
++    const p = resolveTool('implview', cfg);
++    return p ? { found: true, path: p, reason: `paths.implview (${p})` } : { found: false, path: null, reason: `paths.implview (${cfg.paths.implview}) is not an executable file` };
++  }
++  const sibling = path.resolve(root, '..', '.venv', 'bin', 'implview');
++  if (fss.existsSync(sibling)) return { found: true, path: sibling, reason: `the umbrella checkout's (${sibling})` };
++  const onPath = resolveTool('implview', { paths: {} });
++  return onPath ? { found: true, path: onPath, reason: 'implview on PATH' } : { found: false, path: null, reason: 'implview not found (paths.implview, <silinx>/../.venv/bin/implview, PATH)' };
++}
++
++/** Vivado's program for implview: the local Vivado of Toolchain Settings (its settings64.sh's bin/vivado), else none
++ *  (implview then looks for one itself). */
++function vivadoForImplview(cfg) {
++  const s = cfg?.vivado?.settings;
++  if ((cfg?.vivado?.mode || 'docker') !== 'local' || !s) return null;
++  const v = path.join(path.dirname(s), 'bin', 'vivado');
++  return fss.existsSync(v) ? v : null;
++}
++
++/** The environment implview runs in: its cache in the build folder, the local Vivado. */
++function implviewEnv(cfg, buildDir) {
++  const vivado = vivadoForImplview(cfg);
++  return { IMPLVIEW_CACHE: path.join(buildDir, 'implview', 'cache'), ...(vivado ? { IMPLVIEW_VIVADO: vivado } : {}) };
++}
++
++/** Run implview in a job (its lines the job's): resolves, or throws with the program's exit code. */
++export async function runImplview(job, args, { buildDir, cfg = null, env = {} } = {}) {
++  cfg ||= await loadConfig();
++  const tool = implviewTool(cfg);
++  if (!tool.found) throw Object.assign(new Error(`${tool.reason}. ${IMPLVIEW_HELP}`), { status: 400 });
++  await fs.mkdir(path.join(buildDir, 'implview', 'cache'), { recursive: true });
++  const code = await runCommand(job, tool.path, args, { cwd: buildDir, env: { ...implviewEnv(cfg, buildDir), ...env } });
++  if (code !== 0) throw new Error(`implview ${args[0]} failed (exit code ${code})`);
++}
++
++const gunzipText = async f => zlib.gunzipSync(await fs.readFile(f)).toString('utf8');
++
++/** The device file of a part in the build's implview cache (implview's own name: <part>.ivdev.gz), else null. */
++export function deviceFileOf(buildDir, part) {
++  const dir = path.join(buildDir, 'implview', 'cache', 'devices');
++  try {
++    const f = fss.readdirSync(dir).find(n => n.toLowerCase() === `${String(part).toLowerCase()}.ivdev.gz`);
++    return f ? path.join(dir, f) : null;
++  } catch { return null; }
++}
++
++/** View Implemented Design of a Vivado build: implview export --detail of build/post_route.dcp into
++ *  build/implview/<top>.ivd.gz. */
++export async function exportVivadoView(job, { buildDir, top, cfg = null }) {
++  const dcp = path.join(buildDir, 'post_route.dcp');
++  if (!fss.existsSync(dcp)) throw Object.assign(new Error('no routed checkpoint (build/post_route.dcp): run Place & Route first'), { status: 400 });
++  job.log(`View Implemented Design (FPGA): implview export --detail of ${path.basename(dcp)}`);
++  await runImplview(job, ['export', '--detail', '--paths', '0', '-o', path.join('implview', `${top}.ivd.gz`), 'post_route.dcp'], { buildDir, cfg });
++}
++
++/** The model of the view (web/js/fpgaview.js's) of a 7-series build: Vivado's (build/implview/<top>.ivd.gz) or the open
++ *  flow's (build/openxc7/implview.ivd.gz with nextpnr's JSON), cached in build/implview/fpga-view.json by the files'
++ *  times. { available: false, reason } when the export is missing or older than the build. */
++export async function implviewViewModel(buildDir, top, { source }) {
++  const mtime = p => { try { return fss.statSync(p).mtimeMs; } catch { return 0; } };
++  const ivd = source === 'openxc7' ? path.join(buildDir, 'openxc7', 'implview.ivd.gz') : path.join(buildDir, 'implview', `${top}.ivd.gz`);
++  const built = source === 'openxc7' ? mtime(path.join(buildDir, 'openxc7', 'routed.json')) : mtime(path.join(buildDir, 'post_route.dcp'));
++  if (!built) return { available: false, reason: 'no-ncd' };
++  if (!mtime(ivd)) return { available: false, reason: 'no-xdl' };
++  if (mtime(ivd) < built) return { available: false, reason: 'stale' };
++  const design = parseIvd(await gunzipText(ivd));
++  const devFile = deviceFileOf(buildDir, design.info.part);
++  if (!devFile) return { available: false, reason: 'error', error: `no device file of ${design.info.part} in build/implview/cache: implview device ${design.info.part} (it needs Vivado once per part)` };
++  const key = `${IMPLVIEW_MODEL_VERSION}:${source}:${mtime(ivd)}:${mtime(devFile)}`;
++  const cache = path.join(buildDir, 'implview', `fpga-view-${source}.json`);
++  try { const c = JSON.parse(await fs.readFile(cache, 'utf8')); if (c.key === key) return c.model; } catch { /* not cached */ }
++  const dev = parseIvdev(await gunzipText(devFile));
++  const m = source === 'openxc7'
++    ? nextpnrModel(design, dev, JSON.parse(await fs.readFile(path.join(buildDir, 'openxc7', 'routed.json'), 'utf8')))
++    : implviewModel(design, dev);
++  const model = { available: true, ...m };
++  await fs.mkdir(path.dirname(cache), { recursive: true });
++  await fs.writeFile(cache, JSON.stringify({ key, model }));
++  return model;
++}
+diff --git a/server/mcp-implview.js b/server/mcp-implview.js
+new file mode 100644
+index 0000000..8dd1c9f
+--- /dev/null
++++ b/server/mcp-implview.js
+@@ -0,0 +1,79 @@
++// The MCP server's tools of a 7-series build's implemented design (#implview, #crosscheck; server/mcp.js, #2674), as
++// the interface's View Implemented Design (FPGA) and Cross-Check: fpga_view, the model of the view (its utilisation and
++// modules, a site's cells and pins, a net's ends and route), made from AMD Vivado's or the open flow's build by
++// implview (server/implview.js); cross_check, the build against its bitstream (server/crosscheck.js).
++import path from 'node:path';
++import * as P from './projects.js';
++import { toolError, readProject, clip, PROJECT } from './mcp-util.js';
++
++const STR = d => ({ type: 'string', description: d });
++const wait = async (job, timeoutS, name) => {
++  const end = Date.now() + timeoutS * 1000;
++  while (job.status === 'running' && Date.now() < end) await new Promise(r => setTimeout(r, 250));
++  if (job.status === 'running') { (await import('./jobs.js')).cancelJob(job.id); throw toolError(`${name} did not end in ${timeoutS} s: stopped`); }
++  if (job.status !== 'ok') throw toolError(`${name} failed: ${job.error || 'see its log'}\n${job.lines.slice(-20).join('\n')}`);
++  return job;
++};
++
++/** The view's model of a project (GET /projects/:p/fpga-view's, made first when `make`: the fpgaview step). */
++async function viewModel(name, pj, { make, timeoutS }) {
++  const { implviewViewModel } = await import('./implview.js');
++  const buildDir = path.join(P.projectDir(name), 'build'), source = pj.synthTool === 'openxc7' ? 'openxc7' : 'vivado';
++  let m = await implviewViewModel(buildDir, pj.top, { source });
++  if (!m.available && make && ['no-xdl', 'stale'].includes(m.reason)) {
++    const { startImplementation } = await import('./impl-routes.js');
++    await wait(await startImplementation(name, { steps: ['fpgaview'] }), timeoutS, 'View Implemented Design');
++    m = await implviewViewModel(buildDir, pj.top, { source });
++  }
++  if (!m.available) throw toolError(m.reason === 'no-ncd' ? `'${name}' has no routed design: run_process implement first` : m.error || `the implemented design of '${name}' is not exported (${m.reason}): fpga_view with make true`);
++  return m;
++}
++
++export const IMPLVIEW_TOOLS = [
++  {
++    name: 'fpga_view', title: 'View Implemented Design (FPGA) of a 7-series build',
++    description: 'The implemented design inside the FPGA, as View Implemented Design (FPGA) shows it, of a 7-series build: AMD Vivado\'s routed checkpoint (implview export --detail) or the open 7-series flow\'s (openXC7: implview import-nextpnr and nextpnr\'s JSON). Without site or net: the device, the utilisation and the modules (sites per hierarchy path). site: that site\'s cells (LUT equations on the BEL pins with their input nets, flip-flops and their settings) and pins with their nets. net: its driver, loads, kind (clock / signal) and the tiles its route goes through. make: export the routed design first when it is not (or is older than the build).',
++    inputSchema: { type: 'object', properties: { project: PROJECT, site: STR('A site, e.g. SLICE_X0Y47.'), net: STR('A net, by its name.'), make: { type: 'boolean', description: 'Export the routed design first when needed (default true).' }, timeout_s: { type: 'integer', description: 'How long to wait for the export, in seconds (default 600).' } }, required: ['project'], additionalProperties: false },
++    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
++    async run({ project: name, site, net, make = true, timeout_s: timeoutS = 600 }) {
++      const pj = await readProject(name);
++      if (!pj.top) throw toolError(`the project '${name}' has no top module`);
++      const { vivadoDevice } = await import('../packages/silinx-fpga/src/parts.js');
++      if (!vivadoDevice(pj.device)) throw toolError(`fpga_view is for the 7-series builds (AMD Vivado, the open 7-series flow): '${name}' is a ${String(pj.device?.part || '').toUpperCase()}`);
++      const m = await viewModel(name, pj, { make, timeoutS });
++      const head = { project: name, source: m.source, tool: m.tool, part: m.device.part, design: m.design.name };
++      if (site) {
++        const i = m.insts.find(x => x.site.toLowerCase() === String(site).toLowerCase());
++        if (!i) throw toolError(`site '${site}' is not used by the design (${m.insts.length} sites are)`);
++        const pins = Object.fromEntries(Object.entries(i.pins).map(([p, k]) => [p, m.nets[k].name]));
++        const data = { ...head, site: i.site, type: i.type, tile: i.tile, module: i.module, cells: i.cells.map(({ bel, kind, name: n, ref, eq, text, inputs, init }) => ({ bel, kind, name: n, ref, eq, text, inputs, init })), settings: i.opt, pins, io: i.io || null };
++        return { text: clip(JSON.stringify(data, null, 2)), data, untrusted: 'the design\'s names' };
++      }
++      if (net) {
++        const n = m.nets.find(x => x.name === net) || m.nets.find(x => x.name.toLowerCase() === String(net).toLowerCase());
++        if (!n) throw toolError(`no net '${net}'`);
++        const end = ([k, p]) => ({ site: m.insts[k].site, pin: p });
++        const data = { ...head, net: n.name, kind: n.kind, driver: n.driver ? end(n.driver) : null, loads: n.loads.map(end), tiles: n.tiles, pips: n.pips };
++        return { text: clip(JSON.stringify(data, null, 2)), data, untrusted: 'the design\'s names' };
++      }
++      const data = { ...head, util: m.util, modules: m.modules, sites: m.insts.length, nets: m.nets.length, clocks: m.nets.filter(x => x.kind === 'clock').map(x => ({ name: x.name, loads: x.loads.length })) };
++      return { text: clip(JSON.stringify(data, null, 2)), data, untrusted: 'the design\'s names' };
++    },
++  },
++  {
++    name: 'cross_check', title: 'Cross-Check a 7-series build against its bitstream',
++    description: 'Cross-Check, as the process of the interface: AMD Vivado\'s build checked against its bitstream decoded by Project X-Ray\'s bit2fasm (implview crosscheck: the used slices, LUT and FF BELs, each LUT\'s physical INIT, FF INIT / reset and the slices\' CE / SR / FFSYNC / LATCH / CLKINV, the pips) and Vivado\'s own checks (report_route_status, ROUTE vs get_nodes); the open 7-series flow\'s bitstream decoded against nextpnr\'s FASM (they must agree on every feature with configuration bits) and encoded again against its frames; both builds compared when there are both. UltraScale+ / Versal: not cross-checkable (no open bitstream database), Vivado\'s own checks only. The report is also build/crosscheck.txt and build/crosscheck.json.',
++    inputSchema: { type: 'object', properties: { project: PROJECT, timeout_s: { type: 'integer', description: 'How long to wait, in seconds (default 1200, at most 7200).' } }, required: ['project'], additionalProperties: false },
++    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
++    async run({ project: name, timeout_s: timeoutS = 1200 }) {
++      if (!Number.isInteger(timeoutS) || timeoutS < 1 || timeoutS > 7200) throw toolError('timeout_s: from 1 to 7200 s');
++      await readProject(name);
++      const { startCrossCheck } = await import('./impl-routes.js');
++      let job;
++      try { job = await startCrossCheck(name); } catch (e) { throw toolError(e.message); }
++      await wait(job, timeoutS, 'Cross-Check');
++      const r = job.result;
++      return { text: r.text, data: { project: name, part: r.part, family: r.family, checkable: r.checkable, vivado: r.vivado || null, openxc7: r.openxc7 || null, comparison: r.comparison || null } };
++    },
++  },
++];
+diff --git a/server/mcp-processes.js b/server/mcp-processes.js
+index f8186cb..7d82cc9 100644
+--- a/server/mcp-processes.js
++++ b/server/mcp-processes.js
+@@ -40,6 +40,16 @@ export const REPORT_FILES = {
+     pins: top => `build/${top}_pins.ucf`,
+     drc: null,
+   },
++  // the open 7-series flow's (openXC7, #openxc7, server/openxc7.js): Yosys's statistics, nextpnr's log, the timing in it
++  openxc7: {
++    power: () => null,
++    timing: () => 'build/openxc7/nextpnr.log',
++    synthesis: () => 'build/openxc7/synth_stat.txt',
++    map: () => 'build/openxc7/nextpnr.log',
++    par: () => 'build/openxc7/nextpnr.log',
++    pins: () => null,
++    drc: () => null,
++  },
+   // AMD Vivado's (the 7-series, #1649, server/vivado.js): report_utilization after synthesis and after routing,
+   // report_route_status, report_timing_summary, report_power, report_io, report_drc
+   vivado: {
+@@ -52,7 +62,7 @@ export const REPORT_FILES = {
+     drc: top => `build/${top}_drc.rpt`,
+   },
+ };
+-const TOOLCHAIN_NAMES = { silinx: 'Silinx toolchain', ise: 'Xilinx ISE', vivado: 'AMD Vivado' };
++const TOOLCHAIN_NAMES = { silinx: 'Silinx toolchain', ise: 'Xilinx ISE', vivado: 'AMD Vivado', openxc7: 'open 7-series flow, openXC7' };
+ // the map and par reports of a Silinx toolchain run, from its Design Summary (build/reports.json); the router's passes
+ // only when the engine counts them (nextpnr's do not, #2420)
+ export const OPEN_REPORTS = {
+@@ -94,7 +104,7 @@ export async function runProcess(name, proc, { toolchain, timeoutS = 1800, signa
+   const lines = job.lines.map(redact);
+   // (Vivado's critical warnings too, #1649)
+   const errors = lines.filter(l => /^ERROR/.test(l)), warnings = lines.filter(l => /^(CRITICAL )?WARNING/.test(l));
+-  const tc = ['silinx', 'vivado'].includes(job.meta?.toolchain) ? job.meta.toolchain : 'ise';
++  const tc = ['silinx', 'vivado', 'openxc7'].includes(job.meta?.toolchain) ? job.meta.toolchain : 'ise';
+   return { top: pj.top, lines, errors, warnings, ok: job.status === 'ok', silinx: tc === 'silinx', toolchain: tc };
+ }
+ 
+@@ -146,7 +156,7 @@ export const PROCESS_TOOLS = [
+       const summary = await projectReports(name).catch(() => ({ available: false }));
+       const top = pj.top || 'top';
+       const build = path.join(P.projectDir(name), 'build');
+-      const tc = summary.available !== false ? ({ open: 'silinx', vivado: 'vivado' })[summary.source] || 'ise'
++      const tc = summary.available !== false ? ({ open: 'silinx', vivado: 'vivado', openxc7: 'openxc7' })[summary.source] || 'ise'
+         : fs.existsSync(path.join(build, 'run.tcl')) ? 'vivado' : fs.existsSync(path.join(build, `${top}.syr`)) ? 'ise' : 'silinx';
+       const open = tc === 'silinx', who = TOOLCHAIN_NAMES[tc];
+       const file = REPORT_FILES[open ? 'open' : tc][report]?.(top);
+diff --git a/server/mcp-settings.js b/server/mcp-settings.js
+index 4d44130..7ea9a89 100644
+--- a/server/mcp-settings.js
++++ b/server/mcp-settings.js
+@@ -21,7 +21,7 @@ const withoutKind = (pj, drop) => { if (drop) delete pj.kind; return pj; };
+ const devices = () => import('./devices.js');
+ const parts = () => import('../packages/silinx-fpga/src/parts.js');
+ 
+-const SYNTH_TOOLS = ['silinx', 'xst', 'vivado'];   // (vivado: the Artix-7's, #3146)
++const SYNTH_TOOLS = ['silinx', 'xst', 'vivado', 'openxc7'];   // (vivado: the Artix-7's, #3146; openxc7: the open 7-series flow of the native tools, #openxc7)
+ const OPTIMIZATIONS = ['fast', 'area', 'speed'];
+ const STARTUP_CLOCKS = { jtag: 'JtagClk', cclk: 'CCLK', user: 'UserClk' };
+ // the Spartan-6's Map (#3138): nextpnr's packer (the default since its parity, #3139, #3140), or Silinx's
+@@ -159,10 +159,12 @@ export const SETTINGS_TOOLS = [
+       if (synthTool === 'vivado' && !vivado) throw toolError(`AMD Vivado implements the 7-series devices of Vivado ML Standard (the Artix-7, the Spartan-7, the Kintex-7, the Zynq-7000), not the ${next.part.toUpperCase()}`);
+       // (#3895: the Spartan-7, the Kintex-7, the Zynq-7000: AMD Vivado's alone, as the dialog locks it)
+       const vivadoOnly = vivado && !R.openFlowDevice(next);
++      // (the open 7-series flow of the native tools, openXC7: any 7-series device, #openxc7)
++      if (synthTool === 'openxc7' && !vivado) throw toolError(`the open 7-series flow (openXC7) implements the 7-series devices, not the ${next.part.toUpperCase()}`);
+       if (vivadoOnly && synthTool === 'silinx') throw toolError(`${R.noOpenFlowMessage(next)}: no Silinx synthesis tool`);
+       // (#3146) the Artix-7's synthesis tool: the one given, else the project's when it was one of the Artix-7's, else AMD Vivado;
+       // a Vivado-only family's Vivado; another family's never Vivado (the project's, from an Artix-7: Silinx)
+-      const synthOf = () => (vivadoOnly ? { synthTool: 'vivado' } : vivado ? { synthTool: synthTool || (R.vivadoDevice(pj.device) && R.openFlowDevice(pj.device) && ['vivado', 'silinx'].includes(pj.synthTool) ? pj.synthTool : 'vivado') }
++      const synthOf = () => (vivado && (synthTool === 'openxc7' || (!synthTool && pj.synthTool === 'openxc7' && R.vivadoDevice(pj.device))) ? { synthTool: 'openxc7' } : vivadoOnly ? { synthTool: 'vivado' } : vivado ? { synthTool: synthTool || (R.vivadoDevice(pj.device) && R.openFlowDevice(pj.device) && ['vivado', 'silinx'].includes(pj.synthTool) ? pj.synthTool : 'vivado') }
+         : R.openOnlyDevice(next) || experimental ? { synthTool: 'silinx' } : synthTool ? { synthTool } : pj.synthTool === 'vivado' ? { synthTool: 'silinx' } : {});
+       const warnings = [];
+       const deviceChanged = next.part !== pj.device?.part || next.package !== pj.device?.package;
+diff --git a/server/mcp.js b/server/mcp.js
+index 0f8a1cc..dd71fe4 100644
+--- a/server/mcp.js
++++ b/server/mcp.js
+@@ -53,6 +53,7 @@ import { COLLAB_TOOLS, endCollab } from './mcp-collab.js';
+ import { CAPTURE_TOOLS } from './mcp-capture.js';
+ import { BOARD_TOOLS } from './mcp-board.js';
+ import { EDITOR_TOOLS } from './mcp-editor.js';
++import { IMPLVIEW_TOOLS } from './mcp-implview.js';
+ 
+ export { OPEN_REPORTS } from './mcp-processes.js';
+ 
+@@ -67,7 +68,7 @@ const INSTRUCTIONS = 'Silinx: FPGA design for teaching (the Spartan-3E\'s Basys2
+ 
+ // the tools, by area: the projects and their files (mcp-projects.js), their settings (mcp-settings.js), their
+ // new sources (mcp-new-source.js) the wizards (mcp-wizards.js, mcp-test-bench.js), Check Constraints (mcp-constraints.js), the conversions (mcp-convert.js), the read-only views related to a source (mcp-views.js), a drawing's Check (mcp-check.js), a schematic's Rearrange Wires / Schematic (mcp-schematic.js), a module's symbol and Update Symbol (mcp-symbol.js), a symbol's datasheet (mcp-symbol-info.js), a truth table's output logic (mcp-tables.js), the Boolean Notation (mcp-notation.js), a state diagram's outputs and look (mcp-fsm.js), the digital circuits (mcp-circuit.js), a state machine's drawing stepped as its Simulate panel does (mcp-simulate-drawing.js), their sources (mcp-sources.js), Find in Project (mcp-find.js), Open in VS Code (mcp-editor.js), their import and export (mcp-transfer.js), their links (mcp-link.js), git (mcp-git.js), their sharing live (mcp-collab.js), the HDL (mcp-hdl.js), Verify (mcp-verify.js), the wave configurations (mcp-wcfg.js), the C / C++ of Silinx HLS (mcp-hls.js), the processes (mcp-processes.js), the board's programming (mcp-board.js), the logic analyzer's capture (mcp-capture.js), the timing paths (mcp-timing.js), the guided labs (mcp-labs.js), the exercises' grading (mcp-grade.js)
+-export const TOOLS = [...PROJECT_TOOLS, ...SETTINGS_TOOLS, ...NEW_SOURCE_TOOLS, ...WIZARD_TOOLS, ...CONSTRAINTS_TOOLS, ...TEST_BENCH_TOOLS, ...CONVERT_TOOLS, ...VIEW_TOOLS, ...TABLE_TOOLS, ...NOTATION_TOOLS, ...CHECK_TOOLS, ...FSM_TOOLS, ...CIRCUIT_TOOLS, ...KICAD_TOOLS, ...SCHEMATIC_TOOLS, ...SYMBOL_TOOLS, ...SYMBOL_INFO_TOOLS, ...SIMULATE_DRAWING_TOOLS, ...SOURCE_TOOLS, ...FIND_TOOLS, ...EDITOR_TOOLS, ...TRANSFER_TOOLS, ...MERGE_TOOLS, ...LINK_TOOLS, ...GIT_TOOLS, ...COLLAB_TOOLS, ...HDL_TOOLS, ...VERIFY_TOOLS, ...WCFG_TOOLS, ...HLS_TOOLS, ...PROCESS_TOOLS, ...BOARD_TOOLS, ...CAPTURE_TOOLS, ...TIMING_TOOLS, ...LAB_TOOLS, ...GRADE_TOOLS];
++export const TOOLS = [...PROJECT_TOOLS, ...SETTINGS_TOOLS, ...NEW_SOURCE_TOOLS, ...WIZARD_TOOLS, ...CONSTRAINTS_TOOLS, ...TEST_BENCH_TOOLS, ...CONVERT_TOOLS, ...VIEW_TOOLS, ...TABLE_TOOLS, ...NOTATION_TOOLS, ...CHECK_TOOLS, ...FSM_TOOLS, ...CIRCUIT_TOOLS, ...KICAD_TOOLS, ...SCHEMATIC_TOOLS, ...SYMBOL_TOOLS, ...SYMBOL_INFO_TOOLS, ...SIMULATE_DRAWING_TOOLS, ...SOURCE_TOOLS, ...FIND_TOOLS, ...EDITOR_TOOLS, ...TRANSFER_TOOLS, ...MERGE_TOOLS, ...LINK_TOOLS, ...GIT_TOOLS, ...COLLAB_TOOLS, ...HDL_TOOLS, ...VERIFY_TOOLS, ...WCFG_TOOLS, ...HLS_TOOLS, ...PROCESS_TOOLS, ...BOARD_TOOLS, ...CAPTURE_TOOLS, ...TIMING_TOOLS, ...IMPLVIEW_TOOLS, ...LAB_TOOLS, ...GRADE_TOOLS];
+ 
+ // what a tool's error may hold (#3528): the names of a project's files and modules, a remote's
+ const ERROR_UNTRUSTED = 'the error, which may name a project\'s files and modules';
+diff --git a/server/openxc7.js b/server/openxc7.js
+new file mode 100644
+index 0000000..964054a
+--- /dev/null
++++ b/server/openxc7.js
+@@ -0,0 +1,183 @@
++// The open 7-series flow of the native tools (openXC7, #openxc7): the project's synthesis tool 'openxc7' on a 7-series
++// device (the Spartan-7's too, which Silinx's own 7-series back end does not implement). Its steps, ISE's names:
++//   synth  -> Yosys synth_xilinx (its statistics)        translate, map -> the constraints (nextpnr reads the XDC)
++//   par    -> nextpnr-xilinx (the part's chip database)   trce -> nextpnr's timing estimate (its log)
++//   bitgen -> Project X-Ray's fasm2frames and xc7frames2bit
++//   fpgaview -> implview import-nextpnr (server/implview.js): the placement for View Implemented Design
++// Everything in build/openxc7/ (the bitstream build/openxc7/<top>.bit, copied to build/<top>.bit for Configure Target
++// Device): a Vivado build's files of build/ stay. The programs: Toolchain Settings' paths (config.json only: yosys,
++// nextpnr-xilinx, fasm2frames, xc7frames2bit, bit2fasm), else PATH; the data: openxc7.chipdbs ({ part: file }) or
++// openxc7.chipdbDir (<part>.chipdb or <part>.bin), openxc7.prjxrayDb (Project X-Ray's database root).
++import fs from 'node:fs/promises';
++import fss from 'node:fs';
++import path from 'node:path';
++import { generateBuild } from './ise.js';
++import { loadConfig, resolveTool } from './toolchain.js';
++import { runCommand } from './jobs.js';
++import { vivadoPart } from './vivado.js';
++import { hiddenIn, within } from './paths.js';
++import { nextpnrXdc, nextpnrReports, nextpnrSummary, prjxrayFamily, prjxrayParts } from '../core/openxc7.js';
++import { runImplview, deviceFileOf } from './implview.js';
++
++const OPENXC7_STEPS = ['synth', 'translate', 'map', 'par', 'trce', 'bitgen', 'fpgaview'];
++const DEFAULT_STEPS = ['synth', 'translate', 'map', 'par', 'trce', 'bitgen'];
++const OPENXC7_TOOLS = ['yosys', 'nextpnr-xilinx', 'fasm2frames', 'xc7frames2bit', 'bit2fasm'];
++const OPENXC7_HELP = 'Install the openXC7 tools (yosys, nextpnr-xilinx, fasm2frames, xc7frames2bit, bit2fasm) on PATH or name them in ~/.silinx/config.json ("paths": {"nextpnr-xilinx": "…"}), and set "openxc7": {"chipdbs": {"<part>": "<file>.chipdb"}, "prjxrayDb": "<prjxray-db>"} (or "chipdbDir").';
++
++/** The steps of a request in the flow's order; another flow's step: an error. */
++export function openXc7Steps(steps) {
++  const list = !steps || !steps.length ? DEFAULT_STEPS : steps;
++  for (const s of list) if (!OPENXC7_STEPS.includes(s)) throw Object.assign(new Error(`the open 7-series flow (openXC7) has no step '${s}' (${OPENXC7_STEPS.join(', ')})`), { status: 400 });
++  const set = new Set(list);
++  if (set.has('par')) set.add('trce');
++  return OPENXC7_STEPS.filter(s => set.has(s));
++}
++
++/** The chip database of a part: openxc7.chipdbs[part], else <chipdbDir>/<part>.chipdb | .bin; null if none. */
++export function chipdbOf(cfg, part) {
++  const o = cfg?.openxc7 || {};
++  const named = o.chipdbs?.[part];
++  if (named) return fss.existsSync(named) ? named : null;
++  for (const ext of ['.chipdb', '.bin']) { const f = o.chipdbDir && path.join(o.chipdbDir, `${part}${ext}`); if (f && fss.existsSync(f)) return f; }
++  return null;
++}
++
++/** Project X-Ray's database of a part: { root (the family's folder), part (its name there) } or null. */
++export function prjxrayDbOf(cfg, part) {
++  const root = cfg?.openxc7?.prjxrayDb, fam = prjxrayFamily(part);
++  if (!root || !fam) return null;
++  for (const p of prjxrayParts(part)) if (fss.existsSync(path.join(root, fam, p, 'part.yaml'))) return { root: path.join(root, fam), part: p };
++  return null;
++}
++
++/** Can the flow run for a part? { available, reason, tools: { name: path | null }, chipdb, db }. */
++export function openXc7Status(cfg, part) {
++  const tools = Object.fromEntries(OPENXC7_TOOLS.map(t => [t, resolveTool(t, cfg)]));
++  const chipdb = part ? chipdbOf(cfg, part) : null, db = part ? prjxrayDbOf(cfg, part) : null;
++  const missing = OPENXC7_TOOLS.filter(t => t !== 'bit2fasm' && !tools[t]);
++  const reason = missing.length ? `${missing.join(', ')} not found` : part && !chipdb ? `no nextpnr-xilinx chip database of ${part}` : part && !db ? `no Project X-Ray database of ${part}` : 'openXC7 tools found';
++  return { available: !missing.length && (!part || (!!chipdb && !!db)), reason, help: OPENXC7_HELP, tools, chipdb, db };
++}
++
++/** The Yosys script of the synthesis: the sources read (Verilog natively; VHDL and drawings as the Silinx front end's
++ *  flat Verilog, `flat`), synth_xilinx, the statistics, the netlist. */
++export function yosysScript({ top, sources, flat = null }) {
++  // (-defer: each module elaborated with the parameters its instance gives it, a generate branch left out not read)
++  const reads = flat ? [`read_verilog -sv ${flat}`] : sources.map(s => `read_verilog -defer -sv ${s}`);
++  return [...reads, `synth_xilinx -flatten -nodsp -arch xc7 -top ${top}`, 'delete t:$scopeinfo', 'tee -o synth_stat.txt stat', 'write_json synth.json', ''].join('\n');
++}
++
++/** Job body of the open 7-series flow: { project, projectDir, steps }. */
++export async function runOpenXc7(job, { project, projectDir, steps }) {
++  const st = openXc7Steps(steps);
++  const part = vivadoPart(project.device);
++  job.log(`Silinx implementation (open 7-series flow, openXC7): ${project.name} top=${project.top} part=${part}`);
++  const cfg = await loadConfig();
++  const status = openXc7Status(cfg, part);
++  const gen = await generateBuild(project, projectDir, { sourcesOnly: true });
++  const out = path.join(gen.buildDir, 'openxc7');
++  await fs.mkdir(out, { recursive: true });
++  const result = { buildDir: gen.buildDir, steps: st, completedSteps: [], failedStep: null, toolchain: 'openxc7', warnings: [...gen.warnings] };
++  for (const w of gen.warnings) job.log(`WARNING: ${w}`);
++  const needs = st.filter(s => s !== 'fpgaview' && s !== 'translate' && s !== 'map' && s !== 'trce');
++  if (needs.length && !status.available) {
++    job.log(`How to fix: ${OPENXC7_HELP}`);
++    throw Object.assign(new Error(`the open 7-series flow (openXC7) is not available for ${part}: ${status.reason}`), { result });
++  }
++  const top = gen.top;
++  const run = async (step, fn) => {
++    if (!st.includes(step)) return;
++    job.log(`=== SILINX STEP ${step} ===`);
++    try { await fn(); } catch (e) { result.failedStep = step; job.log(`=== SILINX FAILED ${step} ===`); throw Object.assign(e, { result }); }
++    result.completedSteps.push(step);
++    job.result = result;
++  };
++  const tool = async (name, args, opts = {}) => {
++    const code = await runCommand(job, status.tools[name], args, { cwd: out, ...opts });
++    if (code !== 0) throw new Error(`${name} failed (exit code ${code})`);
++  };
++  await run('synth', async () => {
++    for (const f of ['synth.json', 'routed.json', 'routed.fasm', 'nextpnr.log', 'frames', `${top}.bit`, 'implview.ivd.gz']) await fs.rm(path.join(out, f), { force: true });
++    const verilogOnly = gen.sources.every(s => s.lang === 'verilog');
++    let flat = null;
++    if (!verilogOnly) {
++      // (VHDL, drawings: the Silinx front end's elaborated design as one flat Verilog module; its hierarchy flattened)
++      const { flowFrontEnd } = await import('../core/synth-front.js');
++      const srcs = await Promise.all(gen.sources.map(async s => ({ path: s.path, lang: s.lang, text: await fs.readFile(path.join(gen.buildDir, s.buildPath), 'utf8') })));
++      const fe = flowFrontEnd(srcs, top);
++      if (fe.errors.length) throw new Error(`the design has errors:\n${fe.errors.join('\n')}`);
++      const input = fe.input();
++      for (const w of input.warnings || []) job.log(`WARNING:Silinx - ${w}`);
++      await fs.writeFile(path.join(out, `${top}_flat.sv`), input.text);
++      flat = `${top}_flat.sv`;
++      job.log('The VHDL sources (and drawings) read through the Silinx front end, as one flat Verilog module: the hierarchy is flattened.');
++    }
++    await fs.writeFile(path.join(out, 'synth.ys'), yosysScript({ top, sources: gen.sources.map(s => path.relative(out, path.join(gen.buildDir, s.buildPath))), flat }));
++    await tool('yosys', ['-q', '-l', 'yosys.log', '-s', 'synth.ys']);
++  });
++  if (st.includes('translate') || st.includes('par')) {
++    // the constraints: the project's XDC as nextpnr-xilinx reads it
++    const cons = project.constraints && path.resolve(projectDir, project.constraints);
++    if (cons && (!within(projectDir, cons) || hiddenIn(projectDir, cons))) throw Object.assign(new Error(`the constraints file ${project.constraints} is not one of the project's files`), { status: 400, result });
++    const xdc = cons && /\.xdc$/i.test(cons) && fss.existsSync(cons) ? await fs.readFile(cons, 'utf8') : '';
++    if (!xdc) result.warnings.push('no XDC constraints file: nextpnr-xilinx chooses the pins - do NOT program real hardware with this bitstream');
++    const x = nextpnrXdc(xdc);
++    for (const d of x.dropped) job.log(`INFO: nextpnr-xilinx does not read this constraint (left out): ${d}`);
++    await fs.writeFile(path.join(out, 'nextpnr.xdc'), x.text);
++    result.freqMHz = x.freqMHz;
++  }
++  await run('translate', async () => {});
++  await run('map', async () => {});
++  await run('par', async () => {
++    const args = ['--chipdb', status.chipdb, '--xdc', 'nextpnr.xdc', '--json', 'synth.json', '--write', 'routed.json', '--fasm', 'routed.fasm', '--log', 'nextpnr.log'];
++    if (result.freqMHz) args.push('--freq', String(result.freqMHz));
++    await tool('nextpnr-xilinx', args, { echo: true });
++  });
++  await run('trce', async () => {
++    const r = nextpnrReports(await fs.readFile(path.join(out, 'nextpnr.log'), 'utf8').catch(() => ''));
++    for (const c of r.timing.clocks) job.log(`Timing (nextpnr's estimate): clock ${c.clock}: ${c.maxFreqMHz} MHz (${c.pass ? 'PASS' : 'FAIL'} at ${c.targetMHz} MHz)`);
++  });
++  await run('bitgen', async () => {
++    await tool('fasm2frames', ['--db-root', status.db.root, '--part', status.db.part, 'routed.fasm', 'frames']);
++    await tool('xc7frames2bit', ['--part_file', path.join(status.db.root, status.db.part, 'part.yaml'), '--part_name', status.db.part, '--frm_file', 'frames', '--output_file', `${top}.bit`]);
++    await fs.copyFile(path.join(out, `${top}.bit`), path.join(gen.buildDir, `${top}.bit`));
++    job.log(`Bitstream: build/openxc7/${top}.bit (copied to build/${top}.bit)`);
++  });
++  await run('fpgaview', () => importNextpnrView(job, { buildDir: gen.buildDir, top, part, cfg }));
++  job.log('=== SILINX DONE ===');
++  result.reports = await collectOpenXc7Reports(gen.buildDir, top, project.device);
++  await fs.writeFile(path.join(gen.buildDir, 'reports.json'), JSON.stringify(result.reports, null, 2) + '\n');
++  return result;
++}
++
++/** View Implemented Design of the open flow: implview import-nextpnr of nextpnr's JSON and FASM (the part's device file
++ *  first, implview device, when the build's cache has none: it needs Vivado once). */
++async function importNextpnrView(job, { buildDir, top, part, cfg }) {
++  const out = path.join(buildDir, 'openxc7');
++  if (!fss.existsSync(path.join(out, 'routed.json'))) throw Object.assign(new Error('no nextpnr result (build/openxc7/routed.json): run Place & Route first'), { status: 400 });
++  if (!deviceFileOf(buildDir, part)) await runImplview(job, ['device', part], { buildDir, cfg });
++  await runImplview(job, ['import-nextpnr', path.join('openxc7', 'routed.json'), '--fasm', path.join('openxc7', 'routed.fasm'), '--part', part, '--top', top, '-o', path.join('openxc7', 'implview.ivd.gz')], { buildDir, cfg });
++}
++
++const readIf = async f => { try { return await fs.readFile(f, 'utf8'); } catch { return null; } };
++
++/** The reports of an open 7-series build (build/reports.json's shape, source 'openxc7'). */
++export async function collectOpenXc7Reports(buildDir, top, device) {
++  const out = path.join(buildDir, 'openxc7');
++  const r = { generatedAt: new Date().toISOString(), top, device: device || null, source: 'openxc7' };
++  const stat = await readIf(path.join(out, 'synth_stat.txt'));
++  if (stat) {
++    const cells = [...stat.matchAll(/^\s+(\d+)\s+([A-Z][A-Z0-9_]*)\s*$/gm)].map(m => ({ name: m[2], used: +m[1] }));   // (the cells by type: '   8   CARRY4')
++    r.synthesis = { utilization: cells, errors: 0, warnings: (await readIf(path.join(out, 'yosys.log')) || '').split('\n').filter(l => /^Warning:/.test(l)).length };
++  }
++  const log = await readIf(path.join(out, 'nextpnr.log'));
++  if (log) {
++    const n = nextpnrReports(log);
++    r.map = { utilization: n.utilization.map(u => ({ ...u, level: 0 })), summary: nextpnrSummary(n.utilization), errors: (log.match(/^ERROR:/gm) || []).length, warnings: (log.match(/^Warning:/gm) || []).length };
++    r.par = { routed: n.routed };
++    r.timing = n.timing;
++  }
++  if (fss.existsSync(path.join(out, `${top}.bit`))) r.bit = { path: path.join(out, `${top}.bit`), size: fss.statSync(path.join(out, `${top}.bit`)).size };
++  r.summary = { synthesized: !!r.synthesis, mapped: !!r.map, routed: r.par ? r.par.routed : null, timingMet: r.timing?.met ?? null, maxFreqMHz: r.timing?.maxFreqMHz ?? null, utilization: r.map?.summary || null, drc: null, bitstream: !!r.bit };
++  return r;
++}
+diff --git a/server/toolchain.js b/server/toolchain.js
+index c17bf2f..010e9dd 100644
+--- a/server/toolchain.js
++++ b/server/toolchain.js
+@@ -70,6 +70,7 @@ export const DEFAULT_CONFIG = Object.freeze({
+   ssh: { host: '', user: '', port: 22, identity: '', remoteDir: 'silinx-build', settings: DEFAULT_SETTINGS, image: '', sshArgs: [], earlierDirs: [] },   // image: docker image on the host ('' = ISE installed there); earlierDirs: remoteDir's earlier values (#3407)
+   open: { iseMode: 'docker' },                  // Silinx toolchain mode: the ISE that builds device descriptions (developers) (local|docker|ssh)
+   vivado: { mode: 'docker', image: '', settings: '' },   // AMD Vivado (7-series): its mode (local|docker|ssh), image, settings64.sh ('' = found)
++  openxc7: { chipdbs: {}, chipdbDir: '', prjxrayDb: '' },   // the open 7-series flow's data (#openxc7, server/openxc7.js): nextpnr-xilinx's chip databases ({ part: file } or a folder), Project X-Ray's database
+   programmer: { tool: '', cable: '' },          // global defaults (board defaults take precedence when empty)
+   paths: {},                                    // explicit binary paths, e.g. { djtgcfg: '/usr/local/bin/djtgcfg' }
+   relay: { origins: [], key: '', relays: [] },  // shared projects (#3227): the sites whose pages use this relay, the key that opens a room; the other relays this server's pages use
+@@ -112,7 +113,7 @@ export async function loadConfig() {
+ 
+ /** The settings that name a program to run or its arguments: set in config.json (or with the
+  *  command line) only, never through the API (Toolchain Settings does not show them). */
+-export const FILE_ONLY = ['docker.command', 'docker.extraArgs', 'ssh.sshArgs', 'ssh.identity', 'ssh.earlierDirs', 'paths', 'relay', 'mcp', 'editor'];
++export const FILE_ONLY = ['docker.command', 'docker.extraArgs', 'ssh.sshArgs', 'ssh.identity', 'ssh.earlierDirs', 'paths', 'relay', 'mcp', 'editor', 'openxc7'];
+ // the earlier build folders on the ssh host remembered (their files came from projects and stay there, #3407)
+ const EARLIER_DIRS = 100;
+ 
+@@ -400,6 +401,9 @@ export async function detectToolchain() {
+     configPath: configPath(),
+     ise: { ...ise, ...status },
+     vivado: await detectVivadoToolchain(cfg, helpers),
++    // (implview and the open 7-series flow's tools, #implview, #openxc7: found or not; the part's data per project)
++    implview: (await import('./implview.js')).implviewTool(cfg),
++    openxc7: (({ available, reason, tools }) => ({ available, reason, tools }))((await import('./openxc7.js')).openXc7Status(cfg, null)),
+     deviceBuilder: { mode: iseModeOf(cfg), available: builder.available, reason: builder.reason },
+     programmers,
+     helpers,
+diff --git a/server/vivado.js b/server/vivado.js
+index 522dad6..e44ea6f 100644
+--- a/server/vivado.js
++++ b/server/vivado.js
+@@ -16,6 +16,7 @@
+ // the next steps opens. runVivado() runs run.sh in Toolchain Settings' Vivado mode (vivado.mode: docker, ssh or
+ // local, as ISE's modes: server/toolchain.js) inside a job, then parses the reports into build/reports.json
+ // (server/vivado-reports.js). None of Vivado's files is part of Silinx (CLAUDE.md).
++// The fpgaview step (#implview) exports the routed checkpoint with implview into build/implview/{top}.ivd.gz (server/implview.js).
+ 
+ import fs from 'node:fs/promises';
+ import fss from 'node:fs';
+@@ -34,9 +35,9 @@ const VIVADO_VERSION = '2025.2';
+ export const isVivadoDevice = vivadoDevice;
+ 
+ // the steps Vivado runs (ISE's names), in order; the default flow (an empty request) and the ones it does not have
+-const VIVADO_STEPS = ['synth', 'translate', 'map', 'par', 'trce', 'pin2ucf', 'xpwr', 'bitgen', 'prombit'];
++const VIVADO_STEPS = ['synth', 'translate', 'map', 'par', 'trce', 'pin2ucf', 'xpwr', 'bitgen', 'prombit', 'fpgaview'];   // (fpgaview: implview's export of the routed checkpoint, server/implview.js, #implview)
+ const DEFAULT_STEPS = ['synth', 'translate', 'map', 'par', 'trce', 'bitgen'];
+-const NOT_IN_VIVADO = { postsynth: 'post-synthesis simulation model', posttrans: 'post-translate simulation model', postmap: 'post-map simulation model', postpar: 'post-place & route simulation model', fpgaview: 'FPGA view' };
++const NOT_IN_VIVADO = { postsynth: 'post-synthesis simulation model', posttrans: 'post-translate simulation model', postmap: 'post-map simulation model', postpar: 'post-place & route simulation model' };
+ 
+ /** The settings scripts Vivado's run.sh looks for when VIVADO_SETTINGS is not set and vivado is not on PATH. */
+ const SETTINGS_GLOBS = ['/tools/Xilinx/*/Vivado/settings64.sh', '/tools/Xilinx/Vivado/*/settings64.sh', '/opt/Xilinx/*/Vivado/settings64.sh', '/opt/Xilinx/Vivado/*/settings64.sh'];
+@@ -309,19 +310,30 @@ export async function runVivado(job, { project, projectDir, steps, board = null,
+   };
+   // the reports of an earlier run are not this one's
+   if (st.includes('synth')) for (const f of await fs.readdir(gen.buildDir)) if (/\.(rpt|dcp|bit)$/.test(f) || f === 'vivado.log') await fs.rm(path.join(gen.buildDir, f), { force: true });
+-  let code;
++  // (View Implemented Design: implview's export of the routed checkpoint after Vivado's steps, none of run.sh's)
++  const tclSteps = st.filter(s => s !== 'fpgaview');
++  let code = 0;
+   try {
+-    if (cfg.mode === 'local') {
++    if (!tclSteps.length) code = 0;
++    else if (cfg.mode === 'local') {
+       const s = cfg0.vivado?.settings;
+-      code = await runCommand(job, helpers.bash || 'bash', ['run.sh', ...st], { cwd: gen.buildDir, env: s ? { VIVADO_SETTINGS: s } : {}, onLine });
+-    } else if (cfg.mode === 'docker') code = await runDocker(job, cfg, gen, st, onLine);
+-    else code = await runSsh(job, cfg, { helpers }, project, gen, st, onLine, vivadoSshOptions(cfg0));
++      code = await runCommand(job, helpers.bash || 'bash', ['run.sh', ...tclSteps], { cwd: gen.buildDir, env: s ? { VIVADO_SETTINGS: s } : {}, onLine });
++    } else if (cfg.mode === 'docker') code = await runDocker(job, cfg, gen, tclSteps, onLine);
++    else code = await runSsh(job, cfg, { helpers }, project, gen, tclSteps, onLine, vivadoSshOptions(cfg0));
+   } finally {
+     try {
+       result.reports = await collectVivadoReports(gen.buildDir, gen.top, gen.device);
+       await fs.writeFile(path.join(gen.buildDir, 'reports.json'), JSON.stringify(result.reports, null, 2) + '\n');
+     } catch (e) { job.log(`WARNING: report parsing failed: ${e.message}`); }
+   }
++  if (code === 0 && st.includes('fpgaview')) {
++    job.log('=== SILINX STEP fpgaview ===');
++    const { exportVivadoView } = await import('./implview.js');
++    try { await exportVivadoView(job, { buildDir: gen.buildDir, top: gen.top, cfg: cfg0 }); }
++    catch (e) { job.log(`ERROR: ${e.message}`); job.log('=== SILINX FAILED fpgaview ==='); result.failedStep = 'fpgaview'; throw Object.assign(e, { result }); }
++    result.completedSteps.push('fpgaview');
++    job.log('=== SILINX DONE ===');
++  }
+   if (code !== 0) throw Object.assign(new Error(`Vivado flow failed${result.failedStep ? ` in step '${result.failedStep}'` : ''} (exit code ${code})`), { result });
+   job.log(result.reports?.bit ? `Bitstream: ${result.reports.bit.path}` : 'Flow finished.');
+   return result;
+diff --git a/test/crosscheck-fasm.test.js b/test/crosscheck-fasm.test.js
+new file mode 100644
+index 0000000..4436ba9
+--- /dev/null
++++ b/test/crosscheck-fasm.test.js
+@@ -0,0 +1,88 @@
++// Cross-Check of an open 7-series build (#crosscheck, core/crosscheck-fasm.js): FASM as set bits, the database's features
++// of no bits, nextpnr's FASM against the decoded one (identical, consistent, a mismatch), the two builds side by side,
++// and the report's text (server/crosscheck.js).
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { fasmFeatures, segbitsIndex, featureKey, tileTypeOf, compareFasm, compareBuilds } from '../core/crosscheck-fasm.js';
++import { crossCheckText } from '../server/crosscheck.js';
++
++test('fasmFeatures: plain features, single bits, multi-bit values in binary and hex, comments, cleared values', () => {
++  const f = fasmFeatures(`# a comment
++CLBLL_L_X2Y62.SLICEL_X0.ALUT.INIT[7:0] = 8'b10000010
++CLBLL_L_X2Y62.SLICEL_X0.BLUT.INIT[63:32] = 32'h00000003   # trailing
++INT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4
++CLBLL_L_X2Y62.SLICEL_X0.AFF.ZINI = 1
++CLBLL_L_X2Y62.SLICEL_X0.BFF.ZINI = 0
++CLBLL_L_X2Y62.SLICEL_X1.CLUT.INIT[5]
++not a feature line =`);
++  assert.deepEqual([...f].sort(), ['CLBLL_L_X2Y62.SLICEL_X0.AFF.ZINI', 'CLBLL_L_X2Y62.SLICEL_X0.ALUT.INIT[1]', 'CLBLL_L_X2Y62.SLICEL_X0.ALUT.INIT[7]',
++    'CLBLL_L_X2Y62.SLICEL_X0.BLUT.INIT[32]', 'CLBLL_L_X2Y62.SLICEL_X0.BLUT.INIT[33]', 'CLBLL_L_X2Y62.SLICEL_X1.CLUT.INIT[5]', 'INT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4']);
++  // (the two writers' groupings of the same bits: the same set)
++  assert.deepEqual(fasmFeatures("T_X1Y1.A.INIT[63:0] = 64'h8000000000000001"), fasmFeatures('T_X1Y1.A.INIT[0]\nT_X1Y1.A.INIT[63]'));
++});
++
++test('the database: features with bits, of cleared bits only, pseudo pips; keys', () => {
++  const idx = segbitsIndex('CLBLL_L.SLICEL_X0.PRECYINIT.C0 !00_12 !30_13 !30_14\nCLBLL_L.SLICEL_X0.PRECYINIT.C1 00_12 !30_13\nCLBLL_L.SLICEL_X0.ALUT.INIT[0] 33_00\n',
++    'CLBLL_L.CLBLL_LL_A2.CLBLL_IMUX2 always\nCLBLL_L.SLICEL_X0.ALUT.INIT[0] default\n');
++  assert.equal(idx.get('CLBLL_L.SLICEL_X0.PRECYINIT.C0'), false);
++  assert.equal(idx.get('CLBLL_L.SLICEL_X0.PRECYINIT.C1'), true);
++  assert.equal(idx.get('CLBLL_L.CLBLL_LL_A2.CLBLL_IMUX2'), false);
++  assert.equal(idx.get('CLBLL_L.SLICEL_X0.ALUT.INIT[0]'), true);   // (the segbits' entry kept)
++  assert.equal(featureKey('CLBLL_L_X2Y62.SLICEL_X0.PRECYINIT.C0'), 'CLBLL_L.SLICEL_X0.PRECYINIT.C0');
++  assert.equal(tileTypeOf('RIOB33_SING_X31Y0.IOB_Y0.PULLTYPE.PULLDOWN'), 'RIOB33_SING');
++});
++
++const IDX = segbitsIndex('CLBLL_L.SLICEL_X0.PRECYINIT.C0 !00_12\nCLBLL_L.SLICEL_X0.ALUT.INIT[1] 33_01\nINT_L.IMUX_L3.LOGIC_OUTS_L4 01_02\nRIOB33.IOB_Y0.PULLTYPE.PULLDOWN 38_88\n', 'CLBLL_L.CLBLL_LL_A2.CLBLL_IMUX2 always\n');
++const bitsOf = k => IDX.get(k);
++
++test('compareFasm: identical; consistent (differences of no bits, an unused pad\'s defaults); a mismatch', () => {
++  const same = compareFasm({ nextpnr: 'INT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4\n', decoded: 'INT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4\n', bitsOf });
++  assert.equal(same.identical, true);
++  assert.equal(same.consistent, true);
++  const n = 'CLBLL_L_X2Y62.SLICEL_X0.ALUT.INIT[1:0] = 2\'b10\nCLBLL_L_X2Y62.CLBLL_LL_A2.CLBLL_IMUX2\nINT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4\n';
++  const d = 'CLBLL_L_X2Y62.SLICEL_X0.ALUT.INIT[1]\nCLBLL_L_X2Y62.SLICEL_X0.PRECYINIT.C0\nINT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4\nRIOB33_X31Y1.IOB_Y0.PULLTYPE.PULLDOWN\n';
++  const r = compareFasm({ nextpnr: n, decoded: d, bitsOf });
++  assert.equal(r.identical, false);
++  assert.equal(r.consistent, true);
++  assert.deepEqual([r.nextpnr, r.decoded, r.common], [3, 4, 2]);
++  assert.deepEqual(r.onlyNextpnr, { total: 1, noBits: 1, unexplained: 0, samples: [], noBitsSamples: ['CLBLL_L_X2Y62.CLBLL_LL_A2.CLBLL_IMUX2'] });
++  assert.equal(r.onlyDecoded.noBits, 1);
++  assert.equal(r.onlyDecoded.unusedSites, 1);
++  assert.equal(r.onlyDecoded.unexplained, 0);
++  const bad = compareFasm({ nextpnr: n + 'INT_L_X2Y63.IMUX_L3.LOGIC_OUTS_L4\n', decoded: d, bitsOf });
++  assert.equal(bad.consistent, false);
++  assert.deepEqual(bad.onlyNextpnr.samples, ['INT_L_X2Y63.IMUX_L3.LOGIC_OUTS_L4']);
++});
++
++test('compareBuilds: the counts of two models side by side', () => {
++  const m = (luts, ffs) => ({ insts: [{ type: 'SLICEL', cells: [...Array(luts)].map(() => ({ kind: 'lut' })).concat([...Array(ffs)].map(() => ({ kind: 'ff' }))) }, { type: 'IOB33', io: {}, cells: [{ kind: 'inbuf' }] }],
++    nets: [{ kind: 'signal', pips: 5 }, { kind: 'power', pips: 1 }] });
++  const rows = Object.fromEntries(compareBuilds(m(2, 3), m(4, 3)).map(r => [r.name, [r.vivado, r.open]]));
++  assert.deepEqual(rows.LUTs, [2, 4]);
++  assert.deepEqual(rows['Flip-flops'], [3, 3]);
++  assert.deepEqual(rows.Slices, [1, 1]);
++  assert.deepEqual(rows['I/Os'], [1, 1]);
++  assert.deepEqual(rows.Nets, [1, 1]);
++  assert.deepEqual(rows['Routing switches (PIPs)'], [6, 6]);
++});
++
++test('the report: Vivado\'s checks, the open flow\'s, an UltraScale+ part not cross-checkable', () => {
++  const vivado = { sites: { slices_fasm: 47, slices_vivado: 47, slices_match_pct: 100, lut_bels_vivado: 93, lut_bels_found_pct: 100, ff_bels_vivado: 122, ff_bels_match_pct: 100 },
++    lut_init: { match: 116, compared: 119, match_pct: 97.48 }, ff: { ffs: 122, init_reset_match_pct: 100, slice_controls: { CEUSEDMUX: { match_pct: 100 } } },
++    pips: { match: 1235, vivado_pips_with_bits: 1236, vivado_found_in_fasm_pct: 99.92, fasm_explained_by_vivado_pct: 97.55, fasm_explained_excl_defaults_pct: 100 },
++    vivado: { route_status_errors: 0, route_vs_nodes_nets: 203, route_vs_nodes_agree_pct: 100 } };
++  const t = crossCheckText({ part: 'xc7s25csga324-1', family: '7-series', checkable: true, vivado });
++  assert.equal(t, ['Cross-Check (xc7s25csga324-1, 7-series)',
++    'AMD Vivado: the routed design against its bitstream (implview crosscheck, Project X-Ray bit2fasm)',
++    '  Used slices: 47 of 47 (100 %)', '  LUT BELs found: 93 (100 %); FF BELs: 122 (100 %)', '  LUT physical INIT: 116 of 119 (97.48 %)',
++    '  FF INIT / reset: 122 (100 %); CEUSEDMUX 100 %',
++    '  PIPs: 1235 of 1236 Vivado pips found in the bitstream (99.92 %); bitstream pips explained by Vivado 97.55 % (100 % without unused-mux defaults)',
++    '  Vivado: report_route_status errors 0; ROUTE vs get_nodes: 203 nets, 100 %'].join('\n'));
++  const us = crossCheckText({ part: 'xczu3eg-sbva484-1-e', family: 'UltraScale+', checkable: false, reason: 'prjuray partial (UltraScale+): not cross-checkable; Vivado-internal checks only (report_route_status, ROUTE vs get_nodes)', vivado: { vivado: vivado.vivado } });
++  assert.equal(us.split('\n')[1], '  prjuray partial (UltraScale+): not cross-checkable; Vivado-internal checks only (report_route_status, ROUTE vs get_nodes)');
++  assert.equal(us.split('\n').at(-1), '  Vivado: report_route_status errors 0; ROUTE vs get_nodes: 203 nets, 100 %');
++  const fasm = compareFasm({ nextpnr: 'INT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4\n', decoded: 'INT_L_X2Y62.IMUX_L3.LOGIC_OUTS_L4\n', bitsOf });
++  const o = crossCheckText({ part: 'xc7s25csga324-1', family: '7-series', checkable: true, openxc7: { fasm, frames: { identical: true, built: 2624, decoded: 2624 }, db: 'spartan7/xc7s25csga324-1' } });
++  assert.match(o, /Set bits: nextpnr 1, bitstream 1, common 1: identical\n/);
++  assert.match(o, /Frames: the decoded FASM encoded again gives the same 2624 frames$/);
++});
+diff --git a/test/fixtures/implview/blinky-s7.ivd b/test/fixtures/implview/blinky-s7.ivd
+new file mode 100644
+index 0000000..3eab5a6
+--- /dev/null
++++ b/test/fixtures/implview/blinky-s7.ivd
+@@ -0,0 +1,127 @@
++#implview-design	1
++part	xc7s25csga324-1
++architecture	spartan7
++family	spartan7
++device	xc7s25
++package	csga324
++speed	-1
++top	top
++vivado	2025.2.1
++U	BUFGCTRL_X0Y16	BUFG	BUFG	CLK	clk_IBUF_BUFG_inst
++U	IOB_X0Y74	INBUF_EN	IBUF	IO	clk_IBUF_inst
++U	SLICE_X3Y45	A6LUT	LUT1	LUT	u_knight/count[0]_i_1
++U	SLICE_X3Y45	A5LUT	LUT2	LUT	u_knight/count[1]_i_1
++U	SLICE_X3Y45	AFF	FDRE	FLOP_LATCH	u_knight/count_reg[0]
++U	SLICE_X3Y45	A5FF	FDRE	FLOP_LATCH	u_knight/count_reg[1]
++U	SLICE_X2Y45	A6LUT	LUT3	LUT	u_knight/pattern[1]_i_1
++U	SLICE_X2Y45	D6LUT	LUT3	LUT	u_knight/pattern[2]_i_1
++U	SLICE_X2Y45	A5LUT	LUT3	LUT	u_knight/pattern[3]_i_1
++U	SLICE_X2Y45	B6LUT	LUT3	LUT	u_knight/pattern[4]_i_1
++U	SLICE_X2Y45	C6LUT	LUT3	LUT	u_knight/pattern[5]_i_1
++U	SLICE_X2Y45	B5LUT	LUT3	LUT	u_knight/pattern[6]_i_1
++U	SLICE_X2Y45	C5LUT	LUT2	LUT	u_knight/pattern[7]_i_2
++U	SLICE_X2Y45	AFF	FDRE	FLOP_LATCH	u_knight/pattern_reg[1]
++U	SLICE_X2Y45	DFF	FDRE	FLOP_LATCH	u_knight/pattern_reg[2]
++U	SLICE_X2Y45	A5FF	FDRE	FLOP_LATCH	u_knight/pattern_reg[3]
++U	SLICE_X2Y45	BFF	FDRE	FLOP_LATCH	u_knight/pattern_reg[4]
++U	SLICE_X2Y45	CFF	FDRE	FLOP_LATCH	u_knight/pattern_reg[5]
++U	SLICE_X2Y45	B5FF	FDRE	FLOP_LATCH	u_knight/pattern_reg[6]
++U	SLICE_X2Y45	C5FF	FDRE	FLOP_LATCH	u_knight/pattern_reg[7]
++C	1	IOSTANDARD=LVCMOS33
++C	2	INIT=2'h1	PINMAP=I0:A2
++C	3	INIT=4'h6	PINMAP=I0:A2 I1:A5
++C	6	INIT=8'hD8	PINMAP=I0:A3 I1:A2 I2:A5
++C	7	INIT=8'hB8	PINMAP=I0:A4 I1:A1 I2:A2
++C	8	INIT=8'hB8	PINMAP=I0:A1 I1:A3 I2:A2
++C	9	INIT=8'hD8	PINMAP=I0:A3 I1:A1 I2:A2
++C	10	INIT=8'hB8	PINMAP=I0:A5 I1:A1 I2:A3
++C	11	INIT=8'hB8	PINMAP=I0:A5 I1:A3 I2:A1
++C	12	INIT=4'h2	PINMAP=I0:A5 I1:A1
++C	4	INIT=1'b0
++C	5	INIT=1'b0
++C	13	INIT=1'b0
++C	14	INIT=1'b0
++C	15	INIT=1'b0
++C	16	INIT=1'b0
++C	17	INIT=1'b0
++C	18	INIT=1'b0
++C	19	INIT=1'b0
++O	IOB_X0Y74	clk	clk_IBUF_inst
++W	0	clk_IBUF_BUFG	GLOBAL_CLOCK	122	1
++Q	0	0:O	4:C	5:C	13:C	14:C	15:C	16:C	17:C	18:C	19:C
++G	0	CLK_BUFG_TOP_R_X52Y53 CLK_BUFG_REBUF_X52Y65	CLK_BUFG_REBUF_X52Y38 CLK_BUFG_REBUF_X52Y65	CLK_BUFG_REBUF_X52Y38 CLK_HROW_BOT_R_X52Y26	CLK_HROW_BOT_R_X52Y26 CLK_HROW_BOT_R_X52Y26	CLK_HROW_BOT_R_X52Y26 HCLK_L_X11Y26	HCLK_L_X11Y26 INT_L_X2Y37	INT_L_X2Y37 INT_L_X2Y37	INT_L_X2Y37 CLBLL_L_X2Y37
++I	0	CLK_BUFG_TOP_R_X52Y53/CLK_BUFG_TOP_R.CLK_BUFG_BUFGCTRL0_O->>CLK_BUFG_CK_GCLK16	CLK_BUFG_REBUF_X52Y38/CLK_BUFG_REBUF.CLK_BUFG_REBUF_R_CK_GCLK16_BOT<<->>CLK_BUFG_REBUF_R_CK_GCLK16_TOP	CLK_HROW_BOT_R_X52Y26/CLK_HROW_BOT_R.CLK_HROW_R_CK_GCLK16->>CLK_HROW_CK_MUX_OUT_L8	CLK_HROW_BOT_R_X52Y26/CLK_HROW_BOT_R.CLK_HROW_CK_MUX_OUT_L8->>CLK_HROW_CK_HCLK_OUT_L8	CLK_HROW_BOT_R_X52Y26/CLK_HROW_BOT_R.CLK_HROW_CK_HCLK_OUT_L8->>CLK_HROW_CK_BUFHCLK_L8	HCLK_L_X11Y26/HCLK_L.HCLK_CK_BUFHCLK8->>HCLK_LEAF_CLK_B_TOPL5	INT_L_X2Y37/INT_L.GCLK_L_B11->>GCLK_L_B11_WEST	INT_L_X2Y37/INT_L.GCLK_L_B11_WEST->>CLK_L0
++W	1	u_count/E[0]	SIGNAL	20	1
++Q	1	4:CE	5:CE	13:CE	14:CE	15:CE	16:CE	17:CE	18:CE	19:CE
++G	1	CLBLM_R_X3Y40 CLBLM_R_X3Y40	CLBLM_R_X3Y40 INT_R_X3Y40	INT_R_X3Y40 INT_R_X3Y46	INT_R_X3Y46 INT_L_X2Y46	INT_L_X2Y46 INT_L_X2Y45	INT_L_X2Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45	INT_L_X2Y45 INT_R_X3Y44
++I	1	CLBLM_R_X3Y40/CLBLM_R.CLBLM_M_A->CLBLM_LOGIC_OUTS12	INT_R_X3Y40/INT_R.LOGIC_OUTS12->>NN6BEG0	INT_R_X3Y46/INT_R.NN6END0->>WR1BEG1	INT_L_X2Y46/INT_L.WR1END1->>SR1BEG1	INT_L_X2Y45/INT_L.SR1END1->>FAN_ALT7	INT_L_X2Y45/INT_L.FAN_ALT7->>FAN_L7	CLBLL_L_X2Y45/CLBLL_L.CLBLL_FAN7->CLBLL_LL_CE	INT_L_X2Y45/INT_L.SR1END1->>SE2BEG1
++W	2	u_knight/pattern_reg_n_0_[7]	SIGNAL	2	1
++Q	2	19:Q	11:I0
++G	2	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45	INT_R_X3Y45 INT_L_X2Y44	INT_L_X2Y44 CLBLL_L_X2Y44
++I	2	CLBLM_R_X3Y45/CLBLM_R.CLBLM_M_CMUX->CLBLM_LOGIC_OUTS22	INT_R_X3Y45/INT_R.LOGIC_OUTS22->>IMUX24	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX24->CLBLM_M_B5	INT_R_X3Y45/INT_R.LOGIC_OUTS22->>WL1BEG_N3	INT_L_X2Y44/INT_L.WL1END3->>IMUX_L38	CLBLL_L_X2Y44/CLBLL_L.CLBLL_IMUX38->CLBLL_LL_D3
++W	3	u_knight/pattern[6]_i_1_n_0	SIGNAL	1	0
++Q	3	11:O	18:D
++W	4	u_knight/p_1_in	SIGNAL	4	1
++Q	4	18:Q	10:I0	12:I0
++G	4	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45	INT_R_X3Y45 INT_R_X3Y44	INT_R_X3Y44 CLBLM_R_X3Y44	INT_R_X3Y44 INT_L_X2Y44	INT_L_X2Y44 CLBLL_L_X2Y44
++I	4	CLBLM_R_X3Y45/CLBLM_R.CLBLM_M_BMUX->CLBLM_LOGIC_OUTS21	INT_R_X3Y45/INT_R.LOGIC_OUTS21->>IMUX31	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX31->CLBLM_M_C5	INT_R_X3Y45/INT_R.LOGIC_OUTS21->>SL1BEG3	INT_R_X3Y44/INT_R.SL1END3->>IMUX7	CLBLM_R_X3Y44/CLBLM_R.CLBLM_IMUX7->CLBLM_M_A1	INT_R_X3Y44/INT_R.SL1END3->>WL1BEG2	INT_L_X2Y44/INT_L.WL1END2->>IMUX_L28
++W	5	u_knight/pattern[7]_i_2_n_0	SIGNAL	1	0
++Q	5	12:O	19:D
++W	6	u_knight/count_reg[0]	SIGNAL	8	1
++Q	6	4:Q	2:I0	3:I0
++G	6	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45	INT_L_X2Y45 INT_L_X2Y45	INT_L_X2Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45
++I	6	CLBLM_R_X3Y45/CLBLM_R.CLBLM_L_AQ->CLBLM_LOGIC_OUTS0	INT_R_X3Y45/INT_R.LOGIC_OUTS0->>NW2BEG0	INT_L_X2Y45/INT_L.NW2END_S0_0->>IMUX_L31	CLBLL_L_X2Y45/CLBLL_L.CLBLL_IMUX31->CLBLL_LL_C5	INT_L_X2Y45/INT_L.NW2END_S0_0->>SR1BEG_S0	INT_L_X2Y45/INT_L.SR1BEG_S0->>IMUX_L10	CLBLL_L_X2Y45/CLBLL_L.CLBLL_IMUX10->CLBLL_L_A4	INT_L_X2Y45/INT_L.SR1BEG_S0->>IMUX_L1
++W	7	u_knight/pattern[5]_i_1_n_0	SIGNAL	1	0
++Q	7	10:O	17:D
++W	8	u_knight/pattern[1]_i_1_n_0	SIGNAL	1	0
++Q	8	6:O	13:D
++W	9	u_knight/dir_reg_n_0	SIGNAL	9	1
++Q	9	6:I0	9:I0	7:I1	8:I1	10:I1	11:I1	12:I1
++G	9	CLBLM_R_X3Y44 CLBLM_R_X3Y44	CLBLM_R_X3Y44 INT_R_X3Y44	INT_R_X3Y44 CLBLM_R_X3Y44	INT_R_X3Y44 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45
++I	9	CLBLM_R_X3Y44/CLBLM_R.CLBLM_M_AQ->CLBLM_LOGIC_OUTS4	INT_R_X3Y44/INT_R.LOGIC_OUTS4->>IMUX1	CLBLM_R_X3Y44/CLBLM_R.CLBLM_IMUX1->CLBLM_M_A3	INT_R_X3Y44/INT_R.LOGIC_OUTS4->>IMUX17	CLBLM_R_X3Y44/CLBLM_R.CLBLM_IMUX17->CLBLM_M_B3	INT_R_X3Y44/INT_R.LOGIC_OUTS4->>NR1BEG0	INT_R_X3Y45/INT_R.NR1END0->>IMUX1	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX1->CLBLM_M_A3
++W	10	u_knight/pattern_reg_n_0_[3]	SIGNAL	3	1
++Q	10	15:Q	7:I0	9:I2
++G	10	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45	INT_R_X3Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45
++I	10	CLBLM_R_X3Y45/CLBLM_R.CLBLM_M_AMUX->CLBLM_LOGIC_OUTS20	INT_R_X3Y45/INT_R.LOGIC_OUTS20->>SR1BEG3	INT_R_X3Y45/INT_R.SR1END_N3_3->>BYP_ALT0	INT_R_X3Y45/INT_R.BYP_ALT0->>BYP_BOUNCE0	INT_R_X3Y45/INT_R.BYP_BOUNCE0->>IMUX18	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX18->CLBLM_M_B2	INT_R_X3Y45/INT_R.LOGIC_OUTS20->>WL1BEG1	INT_L_X2Y45/INT_L.WL1END1->>IMUX_L34
++W	11	u_knight/pattern[2]_i_1_n_0	SIGNAL	1	0
++Q	11	7:O	14:D
++W	12	u_knight/count_reg[1]	SIGNAL	7	1
++Q	12	5:Q	3:I1
++G	12	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45	INT_R_X3Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45
++I	12	CLBLM_R_X3Y45/CLBLM_R.CLBLM_L_AMUX->CLBLM_LOGIC_OUTS16	INT_R_X3Y45/INT_R.LOGIC_OUTS16->>FAN_ALT5	INT_R_X3Y45/INT_R.FAN_ALT5->>FAN_BOUNCE5	INT_R_X3Y45/INT_R.FAN_BOUNCE5->>IMUX9	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX9->CLBLM_L_A5	INT_R_X3Y45/INT_R.LOGIC_OUTS16->>WR1BEG3	INT_L_X2Y45/INT_L.WR1END3->>IMUX_L7	CLBLL_L_X2Y45/CLBLL_L.CLBLL_IMUX7->CLBLL_LL_A1
++W	13	u_knight/plusOp[1]	SIGNAL	1	0
++Q	13	3:O	5:D
++W	14	u_knight/pattern_reg_n_0_[4]	SIGNAL	3	1
++Q	14	16:Q	8:I0	10:I2
++G	14	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45	INT_R_X3Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45
++I	14	CLBLM_R_X3Y45/CLBLM_R.CLBLM_M_BQ->CLBLM_LOGIC_OUTS5	INT_R_X3Y45/INT_R.LOGIC_OUTS5->>BYP_ALT4	INT_R_X3Y45/INT_R.BYP_ALT4->>BYP_BOUNCE4	INT_R_X3Y45/INT_R.BYP_BOUNCE4->>BYP_ALT5	INT_R_X3Y45/INT_R.BYP_ALT5->>BYP_BOUNCE5	INT_R_X3Y45/INT_R.BYP_BOUNCE5->>IMUX7	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX7->CLBLM_M_A1	INT_R_X3Y45/INT_R.BYP_BOUNCE4->>IMUX22
++W	15	u_knight/p_0_in	SIGNAL	4	1
++Q	15	13:Q	7:I2
++G	15	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45	INT_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45	INT_R_X3Y45 INT_R_X3Y44	INT_R_X3Y44 CLBLM_R_X3Y44
++I	15	CLBLM_R_X3Y45/CLBLM_R.CLBLM_M_AQ->CLBLM_LOGIC_OUTS4	INT_R_X3Y45/INT_R.LOGIC_OUTS4->>WR1BEG1	INT_L_X2Y45/INT_L.WR1END1->>IMUX_L19	CLBLL_L_X2Y45/CLBLL_L.CLBLL_IMUX19->CLBLL_L_B2	INT_R_X3Y45/INT_R.LOGIC_OUTS4->>NL1BEG_N3	INT_R_X3Y45/INT_R.NL1BEG_N3->>IMUX45	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX45->CLBLM_M_D2	INT_R_X3Y45/INT_R.LOGIC_OUTS4->>SR1BEG1
++W	16	u_knight/pattern_reg_n_0_[2]	SIGNAL	3	1
++Q	16	14:Q	6:I1	8:I2
++G	16	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45	INT_R_X3Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45
++I	16	CLBLM_R_X3Y45/CLBLM_R.CLBLM_M_DQ->CLBLM_LOGIC_OUTS7	INT_R_X3Y45/INT_R.LOGIC_OUTS7->>SR1BEG_S0	INT_R_X3Y45/INT_R.SR1BEG_S0->>IMUX2	CLBLM_R_X3Y45/CLBLM_R.CLBLM_IMUX2->CLBLM_M_A2	INT_R_X3Y45/INT_R.LOGIC_OUTS7->>WL1BEG2	INT_L_X2Y45/INT_L.WL1END2->>IMUX_L44	CLBLL_L_X2Y45/CLBLL_L.CLBLL_IMUX44->CLBLL_LL_D4
++W	17	clk_IBUF	SIGNAL	1	1
++Q	17	1:O	0:I
++G	17	LIOB33_X0Y73 LIOI3_X0Y73	LIOI3_X0Y73 LIOI3_X0Y73	LIOI3_X0Y73 HCLK_CMT_X8Y78	HCLK_CMT_X8Y78 CLK_HROW_TOP_R_X52Y78	CLK_HROW_TOP_R_X52Y78 CLK_BUFG_TOP_R_X52Y53
++I	17	LIOI3_X0Y73/LIOI3.LIOI_IBUF0->LIOI_I0	LIOI3_X0Y73/LIOI3.LIOI_I0->LIOI_ILOGIC0_D	LIOI3_X0Y73/LIOI3.LIOI_ILOGIC0_D->>IOI_ILOGIC0_O	LIOI3_X0Y73/LIOI3.IOI_ILOGIC0_O->LIOI_I2GCLK_TOP0	HCLK_CMT_X8Y78/HCLK_CMT.HCLK_CMT_CCIO3->>HCLK_CMT_MUX_CLK_0	CLK_HROW_TOP_R_X52Y78/CLK_HROW_TOP_R.CLK_HROW_CK_IN_L0->>CLK_HROW_TOP_R_CK_BUFG_CASCO0	CLK_BUFG_TOP_R_X52Y53/CLK_BUFG_TOP_R.CLK_BUFG_TOP_R_CK_MUXED0->>CLK_BUFG_BUFGCTRL0_I0
++W	18	sw_IBUF[0]	SIGNAL	38	1
++Q	18	4:R	5:R	13:R	14:R	15:R	16:R	17:R	18:R	19:R
++G	18	LIOB33_X0Y59 LIOI3_X0Y59	LIOI3_X0Y59 LIOI3_X0Y59	LIOI3_X0Y59 IO_INT_INTERFACE_L_X0Y59	IO_INT_INTERFACE_L_X0Y59 INT_L_X0Y59	INT_L_X0Y59 INT_L_X0Y57	INT_L_X0Y57 INT_L_X0Y51	INT_L_X0Y51 INT_L_X0Y45	INT_L_X0Y45 INT_R_X1Y45
++I	18	LIOI3_X0Y59/LIOI3.LIOI_IBUF1->LIOI_I1	LIOI3_X0Y59/LIOI3.LIOI_I1->LIOI_ILOGIC1_D	LIOI3_X0Y59/LIOI3.LIOI_ILOGIC1_D->>IOI_ILOGIC1_O	LIOI3_X0Y59/LIOI3.IOI_ILOGIC1_O->>IOI_LOGIC_OUTS18_0	IO_INT_INTERFACE_L_X0Y59/IO_INT_INTERFACE_L.INT_INTERFACE_LOGIC_OUTS_L_B18->>INT_INTERFACE_LOGIC_OUTS_L18	INT_L_X0Y59/INT_L.LOGIC_OUTS_L18->>SS2BEG0	INT_L_X0Y57/INT_L.SS2END0->>SS6BEG0	INT_L_X0Y51/INT_L.SS6END0->>SS6BEG0
++W	19	u_knight/pattern[3]_i_1_n_0	SIGNAL	1	0
++Q	19	8:O	15:D
++W	20	u_knight/pattern[4]_i_1_n_0	SIGNAL	1	0
++Q	20	9:O	16:D
++W	21	u_knight/pattern_reg_n_0_[5]	SIGNAL	3	1
++Q	21	17:Q	9:I1	11:I2
++G	21	CLBLM_R_X3Y45 CLBLM_R_X3Y45	CLBLM_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 INT_R_X3Y44	INT_R_X3Y44 INT_L_X2Y44	INT_L_X2Y44 CLBLL_L_X2Y44	INT_R_X3Y45 INT_R_X3Y45	INT_R_X3Y45 CLBLM_R_X3Y45
++I	21	CLBLM_R_X3Y45/CLBLM_R.CLBLM_M_CQ->CLBLM_LOGIC_OUTS6	INT_R_X3Y45/INT_R.LOGIC_OUTS6->>SL1BEG2	INT_R_X3Y44/INT_R.SL1END2->>WL1BEG1	INT_L_X2Y44/INT_L.WL1END1->>IMUX_L27	CLBLL_L_X2Y44/CLBLL_L.CLBLL_IMUX27->CLBLL_LL_B4	INT_R_X3Y45/INT_R.LOGIC_OUTS6->>BYP_ALT3	INT_R_X3Y45/INT_R.BYP_ALT3->>BYP_BOUNCE3	INT_R_X3Y45/INT_R.BYP_BOUNCE3->>IMUX15
++W	22	u_knight/plusOp[0]	SIGNAL	1	0
++Q	22	2:O	4:D
++W	23	step	SIGNAL	20	1
++Q	23	4:CE	5:CE	13:CE	14:CE	15:CE	16:CE	17:CE	18:CE	19:CE
++G	23	CLBLM_R_X3Y40 CLBLM_R_X3Y40	CLBLM_R_X3Y40 INT_R_X3Y40	INT_R_X3Y40 INT_R_X3Y46	INT_R_X3Y46 INT_L_X2Y46	INT_L_X2Y46 INT_L_X2Y45	INT_L_X2Y45 INT_L_X2Y45	INT_L_X2Y45 CLBLL_L_X2Y45	INT_L_X2Y45 INT_R_X3Y44
++I	23	CLBLM_R_X3Y40/CLBLM_R.CLBLM_M_A->CLBLM_LOGIC_OUTS12	INT_R_X3Y40/INT_R.LOGIC_OUTS12->>NN6BEG0	INT_R_X3Y46/INT_R.NN6END0->>WR1BEG1	INT_L_X2Y46/INT_L.WR1END1->>SR1BEG1	INT_L_X2Y45/INT_L.SR1END1->>FAN_ALT7	INT_L_X2Y45/INT_L.FAN_ALT7->>FAN_L7	CLBLL_L_X2Y45/CLBLL_L.CLBLL_FAN7->CLBLL_LL_CE	INT_L_X2Y45/INT_L.SR1END1->>SE2BEG1
+diff --git a/test/fixtures/implview/xc7s25-part.ivdev b/test/fixtures/implview/xc7s25-part.ivdev
+new file mode 100644
+index 0000000..d8ee2ae
+--- /dev/null
++++ b/test/fixtures/implview/xc7s25-part.ivdev
+@@ -0,0 +1,147 @@
++#implview-device	1
++part	xc7s25csga324-1
++architecture	spartan7
++family	spartan7
++device	xc7s25
++package	csga324
++speed	-1
++T	HCLK_CMT_X8Y78	HCLK_CMT	8	26	2	0
++T	CLK_HROW_TOP_R_X52Y78	CLK_HROW_TOP_R	52	26	58	0
++T	LIOB33_X0Y73	LIOB33	0	28	2	0
++T	LIOI3_X0Y73	LIOI3	1	28	6	0
++T	CLK_BUFG_REBUF_X52Y65	CLK_BUFG_REBUF	52	39	32	0
++T	LIOB33_X0Y59	LIOB33	0	42	2	0
++T	LIOI3_X0Y59	LIOI3	1	42	6	0
++T	IO_INT_INTERFACE_L_X0Y59	IO_INT_INTERFACE_L	3	42	0	0
++T	INT_L_X0Y59	INT_L	4	42	1	0
++T	INT_L_X0Y57	INT_L	4	44	1	0
++T	INT_L_X0Y51	INT_L	4	50	1	0
++T	CLK_BUFG_TOP_R_X52Y53	CLK_BUFG_TOP_R	52	51	16	0
++T	INT_L_X2Y46	INT_L	11	56	1	0
++T	INT_R_X3Y46	INT_R	12	56	1	0
++T	INT_L_X0Y45	INT_L	4	57	1	0
++T	INT_R_X1Y45	INT_R	5	57	1	0
++T	CLBLL_L_X2Y45	CLBLL_L	10	57	2	0
++T	INT_L_X2Y45	INT_L	11	57	1	0
++T	INT_R_X3Y45	INT_R	12	57	1	0
++T	CLBLM_R_X3Y45	CLBLM_R	13	57	2	0
++T	CLBLL_L_X2Y44	CLBLL_L	10	58	2	0
++T	INT_L_X2Y44	INT_L	11	58	1	0
++T	INT_R_X3Y44	INT_R	12	58	1	0
++T	CLBLM_R_X3Y44	CLBLM_R	13	58	2	0
++T	INT_R_X3Y40	INT_R	12	62	1	0
++T	CLBLM_R_X3Y40	CLBLM_R	13	62	2	0
++T	CLBLL_L_X2Y37	CLBLL_L	10	65	2	0
++T	INT_L_X2Y37	INT_L	11	65	1	0
++T	CLK_BUFG_REBUF_X52Y38	CLK_BUFG_REBUF	52	66	32	0
++T	HCLK_L_X11Y26	HCLK_L	11	78	0	0
++T	CLK_HROW_BOT_R_X52Y26	CLK_HROW_BOT_R	52	78	58	0
++T	NULL_X101Y0	NULL	101	104	0	0
++S	0	BUFMRCE_X0Y3	BUFMRCE	X0Y1	0
++S	0	BUFMRCE_X0Y2	BUFMRCE	X0Y1	0
++S	1	BUFHCE_X0Y12	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y13	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y14	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y15	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y16	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y17	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y18	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y19	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y20	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y21	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y22	BUFHCE	X0Y1	0
++S	1	BUFHCE_X0Y23	BUFHCE	X0Y1	0
++S	1	BUFHCE_X1Y23	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y22	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y21	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y20	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y19	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y18	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y17	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y16	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y15	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y14	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y13	BUFHCE	X1Y1	0
++S	1	BUFHCE_X1Y12	BUFHCE	X1Y1	0
++S	2	IOB_X0Y73	IOB33S	X0Y1	1
++S	2	IOB_X0Y74	IOB33	X0Y1	1
++S	3	OLOGIC_X0Y73	OLOGICE3	X0Y1	0
++S	3	ILOGIC_X0Y73	ILOGICE3	X0Y1	0
++S	3	OLOGIC_X0Y74	OLOGICE3	X0Y1	0
++S	3	ILOGIC_X0Y74	ILOGICE3	X0Y1	0
++S	3	IDELAY_X0Y73	IDELAYE2	X0Y1	0
++S	3	IDELAY_X0Y74	IDELAYE2	X0Y1	0
++S	5	IOB_X0Y59	IOB33	X0Y1	1
++S	5	IOB_X0Y60	IOB33M	X0Y1	1
++S	6	OLOGIC_X0Y59	OLOGICE3	X0Y1	0
++S	6	ILOGIC_X0Y59	ILOGICE3	X0Y1	0
++S	6	OLOGIC_X0Y60	OLOGICE3	X0Y1	0
++S	6	ILOGIC_X0Y60	ILOGICE3	X0Y1	0
++S	6	IDELAY_X0Y59	IDELAYE2	X0Y1	0
++S	6	IDELAY_X0Y60	IDELAYE2	X0Y1	0
++S	8	TIEOFF_X0Y59	TIEOFF	X0Y1	0
++S	9	TIEOFF_X0Y57	TIEOFF	X0Y1	0
++S	10	TIEOFF_X0Y51	TIEOFF	X0Y1	0
++S	11	BUFGCTRL_X0Y16	BUFG		0
++S	11	BUFGCTRL_X0Y17	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y18	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y19	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y20	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y21	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y22	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y23	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y24	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y25	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y26	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y27	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y28	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y29	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y30	BUFGCTRL		0
++S	11	BUFGCTRL_X0Y31	BUFGCTRL		0
++S	12	TIEOFF_X2Y46	TIEOFF	X0Y0	0
++S	13	TIEOFF_X3Y46	TIEOFF	X0Y0	0
++S	14	TIEOFF_X0Y45	TIEOFF	X0Y0	0
++S	15	TIEOFF_X1Y45	TIEOFF	X0Y0	0
++S	16	SLICE_X1Y45	SLICEL	X0Y0	0
++S	16	SLICE_X0Y45	SLICEL	X0Y0	0
++S	17	TIEOFF_X2Y45	TIEOFF	X0Y0	0
++S	18	TIEOFF_X3Y45	TIEOFF	X0Y0	0
++S	19	SLICE_X2Y45	SLICEM	X0Y0	0
++S	19	SLICE_X3Y45	SLICEL	X0Y0	0
++S	20	SLICE_X1Y44	SLICEL	X0Y0	0
++S	20	SLICE_X0Y44	SLICEL	X0Y0	0
++S	21	TIEOFF_X2Y44	TIEOFF	X0Y0	0
++S	22	TIEOFF_X3Y44	TIEOFF	X0Y0	0
++S	23	SLICE_X2Y44	SLICEM	X0Y0	0
++S	23	SLICE_X3Y44	SLICEL	X0Y0	0
++S	24	TIEOFF_X3Y40	TIEOFF	X0Y0	0
++S	25	SLICE_X2Y40	SLICEM	X0Y0	0
++S	25	SLICE_X3Y40	SLICEL	X0Y0	0
++S	26	SLICE_X1Y37	SLICEL	X0Y0	0
++S	26	SLICE_X0Y37	SLICEL	X0Y0	0
++S	27	TIEOFF_X2Y37	TIEOFF	X0Y0	0
++S	30	BUFHCE_X0Y0	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y1	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y2	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y3	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y4	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y5	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y6	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y7	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y8	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y9	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y10	BUFHCE	X0Y0	0
++S	30	BUFHCE_X0Y11	BUFHCE	X0Y0	0
++S	30	BUFHCE_X1Y11	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y10	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y9	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y8	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y7	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y6	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y5	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y4	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y3	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y2	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y1	BUFHCE	X1Y0	0
++S	30	BUFHCE_X1Y0	BUFHCE	X1Y0	0
++K	F14	IOB_X0Y74
+diff --git a/test/implview-model.test.js b/test/implview-model.test.js
+new file mode 100644
+index 0000000..f200797
+--- /dev/null
++++ b/test/implview-model.test.js
+@@ -0,0 +1,142 @@
++// View Implemented Design (FPGA) of a 7-series build (#implview, core/implview-model.js): implview's design and device
++// files (a part of blinky's AMD Vivado build on the Arty S7-25: two slices, the clock's pad and buffer) as the view's
++// model; each LUT's equation checked against its INIT through its pin map on all 64 addresses (xdl.js evalLut, an
++// independent evaluator); the open flow's nextpnr JSON; the malformed files refused.
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { parseIvd, parseIvdev, implviewModel, nextpnrModel, lutEquation, nextpnrPath, isIoType } from '../core/implview-model.js';
++import { evalLut } from '../packages/silinx-fpga/src/xdl.js';
++
++const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'implview');
++const ivd = parseIvd(fs.readFileSync(path.join(FIX, 'blinky-s7.ivd'), 'utf8'));
++const dev = parseIvdev(fs.readFileSync(path.join(FIX, 'xc7s25-part.ivdev'), 'utf8'));
++
++/** The value of a LUT cell at a physical address (A1 the least significant bit): its INIT at the logical address. */
++function initAt(init, pinmap, addr) {
++  const m = /^(\d+)'h([0-9A-F]+)$/i.exec(init);
++  const bits = BigInt(`0x${m[2]}`);
++  let a = 0;
++  for (const p of pinmap.split(' ')) { const [l, ph] = p.split(':'); if (addr >> (+ph[1] - 1) & 1) a |= 1 << +l.slice(1); }
++  return Number((bits >> BigInt(a)) & 1n);
++}
++
++test('the design and device files read: their records', () => {
++  assert.equal(ivd.info.part, 'xc7s25csga324-1');
++  assert.equal(ivd.info.top, 'top');
++  assert.equal(ivd.cells.length, 20);
++  assert.equal(ivd.nets.length, 24);
++  assert.deepEqual(ivd.cells[0], { site: 'BUFGCTRL_X0Y16', bel: 'BUFG', ref: 'BUFG', group: 'CLK', name: 'clk_IBUF_BUFG_inst' });
++  assert.equal(dev.info.part, 'xc7s25csga324-1');
++  assert.ok(dev.tiles.length > 10 && dev.sites.some(s => s.name === 'SLICE_X2Y45'));
++  assert.equal(dev.pins.get('IOB_X0Y74'), 'F14');
++});
++
++test('the model: the grid, the used sites by module, the utilisation', () => {
++  const m = implviewModel(ivd, dev);
++  assert.equal(m.source, 'vivado');
++  assert.equal(m.tool, 'AMD Vivado 2025.2.1');
++  assert.deepEqual(m.design, { name: 'top', part: 'xc7s25csga324-1' });
++  assert.equal(m.device.rows, 105);
++  assert.equal(m.device.cols, 102);
++  assert.deepEqual(m.insts.map(i => [i.site, i.type, i.module]), [
++    ['BUFGCTRL_X0Y16', 'BUFG', ''], ['IOB_X0Y74', 'IOB33', ''], ['SLICE_X3Y45', 'SLICEL', 'u_knight'], ['SLICE_X2Y45', 'SLICEM', 'u_knight']]);
++  assert.deepEqual(m.modules, { '': 2, u_knight: 2 });
++  assert.deepEqual(m.util['Slices'], { used: 2, total: 12 });   // (the fixture's part of the device: its tiles' slices)
++  assert.deepEqual(m.util['Global clock buffers'], { used: 1, total: 16 });
++  // the I/O: its port, package pin, standard
++  const io = m.insts[1];
++  assert.equal(io.name, 'clk');
++  assert.deepEqual(io.io, { pad: 'F14', dir: 'in', standard: 'LVCMOS33', drive: null, slew: null, pull: null });
++});
++
++test('each LUT\'s equation equals its INIT on every address; its inputs\' nets', () => {
++  const m = implviewModel(ivd, dev);
++  let checked = 0;
++  for (const [ci, c] of ivd.cells.entries()) {
++    if (c.group !== 'LUT') continue;
++    const d = ivd.details.get(ci);
++    const cell = m.insts.flatMap(i => i.cells).find(x => x.name === c.name);
++    assert.equal(cell.kind, 'lut');
++    assert.equal(cell.size, 6);
++    for (let a = 0; a < 64; a++) {
++      const v = Object.fromEntries(Array.from({ length: 6 }, (_, k) => [`A${k + 1}`, a >> k & 1]));
++      assert.equal(evalLut(cell.eq, v), initAt(d.INIT, d.PINMAP, a), `${c.name} ${cell.eq} at ${a}`);
++    }
++    checked++;
++  }
++  assert.equal(checked, 9);
++  const s = m.insts.find(i => i.site === 'SLICE_X3Y45');
++  const inv = s.cells.find(c => c.name === 'u_knight/count[0]_i_1');
++  assert.equal(inv.eq, '~A2');
++  assert.deepEqual(Object.keys(inv.inputs), ['A2']);
++  assert.equal(inv.text, `¬${inv.inputs.A2}`);
++});
++
++test('the flip-flops: their settings; the clock net from the buffer to the slices', () => {
++  const m = implviewModel(ivd, dev);
++  const s = m.insts.find(i => i.site === 'SLICE_X2Y45');
++  assert.equal(s.opt.AFF_INIT_ATTR, 'INIT0');
++  assert.equal(s.opt.AFF_SR_ATTR, 'SRLOW');
++  assert.equal(s.opt.SYNC_ATTR, 'SYNC');
++  const clk = m.nets.find(n => n.name === 'clk_IBUF_BUFG');
++  assert.equal(clk.kind, 'clock');
++  assert.equal(m.insts[clk.driver[0]].site, 'BUFGCTRL_X0Y16');
++  assert.deepEqual([...new Set(clk.loads.map(([k, p]) => `${m.insts[k].site}.${p}`))].sort(), ['SLICE_X2Y45.CLK', 'SLICE_X3Y45.CLK']);
++  assert.ok(clk.tiles.length > 1 && clk.pips > 0);
++  assert.equal(s.pins.CLK, m.nets.indexOf(clk));
++});
++
++test('lutEquation: constants, an inverter, a pin map, malformed INITs', () => {
++  assert.deepEqual(lutEquation("2'h1", 'I0:A3'), { eq: '~A3', inputs: ['A3'] });
++  assert.deepEqual(lutEquation("4'h2", 'I0:A5 I1:A2'), { eq: '~A2*A5', inputs: ['A2', 'A5'] });
++  assert.deepEqual(lutEquation("4'h8", 'I0:A1 I1:A6'), { eq: 'A1*A6', inputs: ['A1', 'A6'] });
++  assert.equal(lutEquation("4'h6", 'I0:A1 I1:A2').eq.split('+').length, 2);   // (an XOR: two terms)
++  assert.deepEqual(lutEquation("4'h0", 'I0:A1 I1:A2'), { eq: '0', inputs: ['A1', 'A2'] });
++  assert.deepEqual(lutEquation("4'hF", 'I0:A1 I1:A2'), { eq: '1', inputs: ['A1', 'A2'] });
++  assert.deepEqual(lutEquation("1'b1", ''), { eq: '1', inputs: [] });
++  assert.equal(lutEquation('', 'I0:A1'), null);
++  assert.equal(lutEquation('xyz', 'I0:A1'), null);
++});
++
++test('the open flow: nextpnr\'s cells and nets on implview\'s placement', () => {
++  const ivdN = parseIvd(['#implview-design\t1', 'part\txc7s25csga324-1', 'top\ttop', 'nextpnr\tnextpnr-xilinx',
++    'U\tSLICE_X2Y45\tA6LUT\tLUT\tLUT\tu_a.inv', 'U\tSLICE_X2Y45\tAFF\tFDRE\tFLOP_LATCH\t$auto$ff$1', 'U\tBUFGCTRL_X0Y16\tBUFG\tBUFGCTRL\tCLOCK\tclkbuf'].join('\n'));
++  const json = { modules: { top: { attributes: { top: '1' }, cells: {
++    'u_a.inv': { type: 'SLICE_LUTX', parameters: { INIT: '01'.padStart(64, '0').replace(/.$/, '1').replace(/^0+1$/, '01') }, attributes: { X_ORIG_TYPE: 'LUT1' }, port_directions: { A3: 'input', O6: 'output' }, connections: { A3: [10], O6: [11] } },
++    '$auto$ff$1': { type: 'SLICE_FFX', parameters: { INIT: '0' }, attributes: { X_ORIG_TYPE: 'FDRE' }, port_directions: { CK: 'input', D: 'input', Q: 'output' }, connections: { CK: [12], D: [11], Q: [10] } },
++    clkbuf: { type: 'BUFGCTRL', parameters: {}, attributes: {}, port_directions: { O: 'output' }, connections: { O: [12] } },
++  }, netnames: {
++    'u_a.q': { bits: [10], attributes: { ROUTING: 'SITEWIRE/SLICE_X2Y45/AQ;;1;INT_L_X2Y45/LOGIC_OUTS_L4;INT_L_X2Y45/INT_L.LOGIC_OUTS_L4->>IMUX_L3;1;' } },
++    '$abc$d': { bits: [11], attributes: {} },
++    clk: { bits: [12], attributes: { ROUTING: 'CLK_BUFG_BOT_R_X60Y48/CLK_BUFG_BUFGCTRL0_O;;1' } },
++  } } } };
++  // the inverter of A3: its 64-bit INIT (the last character address 0) 1 where A3 = 0
++  json.modules.top.cells['u_a.inv'].parameters.INIT = Array.from({ length: 64 }, (_, k) => ((63 - k) >> 2 & 1 ? '0' : '1')).join('');
++  const m = nextpnrModel(ivdN, dev, json);
++  assert.equal(m.source, 'openxc7');
++  assert.equal(m.tool, 'nextpnr-xilinx');
++  const s = m.insts.find(i => i.site === 'SLICE_X2Y45');
++  assert.equal(s.module, 'u_a');
++  const lut = s.cells.find(c => c.kind === 'lut');
++  assert.equal(lut.eq, '~A3');
++  assert.deepEqual(lut.inputs, { A3: 'u_a/q' });
++  const ff = s.cells.find(c => c.kind === 'ff');
++  assert.equal(ff.name, 'u_a/q');   // (Yosys's own name: its output's net's)
++  assert.equal(s.opt.AFF_INIT_ATTR, 'INIT0');
++  const clk = m.nets.find(n => n.name === 'clk');
++  assert.equal(clk.kind, 'clock');
++  assert.deepEqual(m.nets.find(n => n.name === 'u_a/q').tiles, ['INT_L_X2Y45']);
++  assert.equal(m.nets.find(n => n.name === 'u_a/q').pips, 1);
++});
++
++test('names and I/O site types; malformed files refused', () => {
++  assert.equal(nextpnrPath('u_uart.u_rx.state_q'), 'u_uart/u_rx/state_q');
++  assert.equal(nextpnrPath('$abc$1$lut'), '$abc$1$lut');
++  for (const t of ['IOB33', 'IOB33M', 'IOB18S', 'IOB', 'HPIOB']) assert.ok(isIoType(t), t);
++  for (const t of ['SLICEL', 'RAMB18E1', 'BUFGCTRL']) assert.ok(!isIoType(t), t);
++  assert.throws(() => parseIvd('#implview-device\t1\n'), /not an implview design file/);
++  assert.throws(() => parseIvdev('#implview-design\t1\n'), /not an implview device file/);
++});
+diff --git a/test/mcp-args.test.js b/test/mcp-args.test.js
+index 817d1c9..475b5bd 100644
+--- a/test/mcp-args.test.js
++++ b/test/mcp-args.test.js
+@@ -90,7 +90,7 @@ test('#3535 a wrong value refused before the tool runs, nothing written: an enum
+   await refused('new_source', { project: 'g', type: 'module', name: 'm1', ports: [{ name: 'a', dir: 'up' }] }, 'new_source: ports[0].dir: one of in, out, inout');
+   await refused('new_source', { project: 'g', type: 'module', name: 'm1', ports: [{ name: 'a', msb: '7' }] }, 'new_source: ports[0].msb: an integer');
+   // (any synthesis tool: not written to silinx.json)
+-  await refused('set_design_properties', { project: 'g', synth_tool: 'foo' }, 'set_design_properties: synth_tool: one of silinx, xst, vivado');
++  await refused('set_design_properties', { project: 'g', synth_tool: 'foo' }, 'set_design_properties: synth_tool: one of silinx, xst, vivado, openxc7');
+   await refused('set_design_properties', { project: 'g', update_constraints: 'yes', board: 'nexys2' }, 'set_design_properties: update_constraints: true or false');
+   // (a number where a name is expected: no JavaScript error)
+   await refused('read_file', { project: 'g', path: 5 }, 'read_file: path: a string');
+diff --git a/test/mcp-implview.test.js b/test/mcp-implview.test.js
+new file mode 100644
+index 0000000..4dd5880
+--- /dev/null
++++ b/test/mcp-implview.test.js
+@@ -0,0 +1,91 @@
++// The MCP server's fpga_view and cross_check (#implview, #crosscheck, #2674: what View Implemented Design (FPGA) and
++// Cross-Check do in the interface), through the same functions: a 7-series build's view made from implview's recorded
++// files (a part of blinky's AMD Vivado build on the Arty S7-25: test/fixtures/implview), its site and net queries, the
++// cache; the refusals (another family, nothing built, an unknown site or net); the open flow's synthesis tool.
++import { test, before, after } from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import path from 'node:path';
++import zlib from 'node:zlib';
++import { fileURLToPath } from 'node:url';
++import { scratchEnv } from './server-helpers.js';
++
++const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'implview');
++let tmp;
++before(async () => { tmp = await scratchEnv('silinx-mcp-implview-'); });
++after(() => fs.rmSync(tmp, { recursive: true, force: true }));
++
++const { handle, TOOLS } = await import('../server/mcp.js');
++const P = await import('../server/projects.js');
++let id = 0;
++async function call(name, args = {}) {
++  const r = (await handle({ jsonrpc: '2.0', id: ++id, method: 'tools/call', params: { name, arguments: args } })).result;
++  return { text: r.content[0].text, data: r.structuredContent, isError: r.isError };
++}
++const ok = async (name, args) => { const r = await call(name, args); assert.equal(r.isError, false, r.text); return r; };
++const fails = async (name, args, message) => { const r = await call(name, args); assert.equal(r.isError, true, r.text); assert.equal(r.text.split('\n[Untrusted')[0], `${name}: ${message}`); };
++
++/** A Vivado build of a project: its routed checkpoint (a stand-in), then implview's export of it. */
++function vivadoBuild(name) {
++  const b = path.join(P.projectDir(name), 'build'), iv = path.join(b, 'implview');
++  fs.mkdirSync(path.join(iv, 'cache', 'devices'), { recursive: true });
++  fs.writeFileSync(path.join(b, 'post_route.dcp'), 'stand-in');
++  const old = new Date(Date.now() - 60000);
++  fs.utimesSync(path.join(b, 'post_route.dcp'), old, old);
++  fs.writeFileSync(path.join(iv, 'top.ivd.gz'), zlib.gzipSync(fs.readFileSync(path.join(FIX, 'blinky-s7.ivd'))));
++  fs.writeFileSync(path.join(iv, 'cache', 'devices', 'xc7s25csga324-1.ivdev.gz'), zlib.gzipSync(fs.readFileSync(path.join(FIX, 'xc7s25-part.ivdev'))));
++}
++
++test('fpga_view and cross_check: listed, their schemas', () => {
++  const v = TOOLS.find(t => t.name === 'fpga_view'), x = TOOLS.find(t => t.name === 'cross_check');
++  assert.deepEqual(Object.keys(v.inputSchema.properties), ['project', 'site', 'net', 'make', 'timeout_s']);
++  assert.deepEqual(Object.keys(x.inputSchema.properties), ['project', 'timeout_s']);
++  assert.deepEqual([v.inputSchema.required, x.inputSchema.required], [['project'], ['project']]);
++  assert.equal(v.annotations.destructiveHint, false);
++});
++
++test('fpga_view: a Vivado build\'s device, utilisation and modules; a site; a net; the cache', async () => {
++  await ok('new_project_from_example', { name: 'b7', example: 'blinky', board: 'arty-s7', variant: '25' });
++  await ok('set_design_properties', { project: 'b7', synth_tool: 'vivado' });
++  await fails('fpga_view', { project: 'b7', make: false }, '\'b7\' has no routed design: run_process implement first');
++  vivadoBuild('b7');
++  const all = await ok('fpga_view', { project: 'b7', make: false });
++  assert.deepEqual([all.data.source, all.data.tool, all.data.part, all.data.design], ['vivado', 'AMD Vivado 2025.2.1', 'xc7s25csga324-1', 'top']);
++  assert.deepEqual(all.data.modules, { '': 2, u_knight: 2 });
++  assert.deepEqual(all.data.clocks, [{ name: 'clk_IBUF_BUFG', loads: 9 }]);
++  assert.equal(all.data.untrusted.content, 'the design\'s names');
++  assert.ok(fs.existsSync(path.join(P.projectDir('b7'), 'build', 'implview', 'fpga-view-vivado.json')));
++  const site = await ok('fpga_view', { project: 'b7', site: 'slice_x3y45' });
++  assert.equal(site.data.site, 'SLICE_X3Y45');
++  assert.equal(site.data.module, 'u_knight');
++  assert.deepEqual(site.data.cells.find(c => c.name === 'u_knight/count[0]_i_1'), { bel: 'A6LUT', kind: 'lut', name: 'u_knight/count[0]_i_1', ref: 'LUT1', eq: '~A2', text: site.data.cells.find(c => c.name === 'u_knight/count[0]_i_1').text, inputs: { A2: site.data.pins.A2 }, init: "2'h1" });
++  assert.equal(site.data.pins.CLK, 'clk_IBUF_BUFG');
++  const net = await ok('fpga_view', { project: 'b7', net: 'clk_IBUF_BUFG' });
++  assert.deepEqual(net.data.driver, { site: 'BUFGCTRL_X0Y16', pin: 'BUFG.O' });
++  assert.equal(net.data.kind, 'clock');
++  await fails('fpga_view', { project: 'b7', site: 'SLICE_X0Y0' }, 'site \'SLICE_X0Y0\' is not used by the design (4 sites are)');
++  await fails('fpga_view', { project: 'b7', net: 'nope' }, 'no net \'nope\'');
++  // (a build newer than the export: stale, exported again only with make)
++  fs.writeFileSync(path.join(P.projectDir('b7'), 'build', 'post_route.dcp'), 'newer');
++  await fails('fpga_view', { project: 'b7', make: false }, 'the implemented design of \'b7\' is not exported (stale): fpga_view with make true');
++});
++
++test('the refusals: another family; cross_check with nothing built; the open flow\'s view not made', async () => {
++  await ok('new_project_from_example', { name: 's3', example: 'gates' });
++  await fails('fpga_view', { project: 's3' }, 'fpga_view is for the 7-series builds (AMD Vivado, the open 7-series flow): \'s3\' is a XC3S250E');
++  await fails('cross_check', { project: 's3' }, 'Cross-Check is for the 7-series builds (AMD Vivado, the open 7-series flow), not the XC3S250E');
++  await ok('new_project_from_example', { name: 'o7', example: 'blinky', board: 'arty-s7', variant: '25' });
++  const set = await ok('set_design_properties', { project: 'o7', synth_tool: 'openxc7' });
++  assert.match(set.text, /synthesis tool openxc7/);
++  // (an assistant's project: trusted by the user first, as Implement's tools)
++  await fails('cross_check', { project: 'o7' }, 'project \'o7\' was made through the MCP server (by an assistant): Cross-Check runs only once you trust it (Trust Project, in the console when the project opens)');
++  const pj = path.join(P.projectDir('o7'), 'silinx.json');
++  fs.writeFileSync(pj, JSON.stringify({ ...JSON.parse(fs.readFileSync(pj, 'utf8')), trusted: true }));
++  await fails('cross_check', { project: 'o7' }, 'nothing to cross-check: implement the design first (AMD Vivado, or the open 7-series flow up to Generate Programming File)');
++  await fails('fpga_view', { project: 'o7', make: false }, '\'o7\' has no routed design: run_process implement first');
++  await fails('cross_check', { project: 'o7', timeout_s: 0 }, 'timeout_s: from 1 to 7200 s');
++});
++
++test('set_design_properties: openxc7 only on a 7-series device', async () => {
++  await fails('set_design_properties', { project: 's3', synth_tool: 'openxc7' }, 'the open 7-series flow (openXC7) implements the 7-series devices, not the XC3S250E');
++});
+diff --git a/test/mcp-modules.test.js b/test/mcp-modules.test.js
+index de2f5c8..7c36a7f 100644
+--- a/test/mcp-modules.test.js
++++ b/test/mcp-modules.test.js
+@@ -38,6 +38,7 @@ const { VERIFY_TOOLS } = await import('../server/mcp-verify.js');
+ const { PROCESS_TOOLS, PROCESSES, REPORT_FILES, OPEN_REPORTS } = await import('../server/mcp-processes.js');
+ const { LAB_TOOLS } = await import('../server/mcp-labs.js');
+ const { TIMING_TOOLS } = await import('../server/mcp-timing.js');
++const { IMPLVIEW_TOOLS } = await import('../server/mcp-implview.js');
+ const { CAPTURE_TOOLS } = await import('../server/mcp-capture.js');
+ const { BOARD_TOOLS } = await import('../server/mcp-board.js');
+ const { SYMBOL_TOOLS } = await import('../server/mcp-symbol.js');
+@@ -89,9 +90,10 @@ test('the tools: those of the areas, the ones of before the split in their order
+   assert.deepEqual(names(BOARD_TOOLS), ['program_board']);   // (Configure Target Device, #2674, #2298)
+   assert.deepEqual(names(CAPTURE_TOOLS), ['capture_settings', 'capture']);   // (the logic analyzer, #3176)
+   assert.deepEqual(names(TIMING_TOOLS), ['timing_paths']);
++  assert.deepEqual(names(IMPLVIEW_TOOLS), ['fpga_view', 'cross_check']);   // (a 7-series build's view and Cross-Check, #implview, #crosscheck)
+   assert.deepEqual(names(LAB_TOOLS), ['lab']);   // (the guided labs, #3179)
+   assert.deepEqual(names(GRADE_TOOLS), ['grade']);   // (automatic grading, #3192)
+-  assert.deepEqual(mcp.TOOLS, [...PROJECT_TOOLS, ...SETTINGS_TOOLS, ...NEW_SOURCE_TOOLS, ...WIZARD_TOOLS, ...CONSTRAINTS_TOOLS, ...TEST_BENCH_TOOLS, ...CONVERT_TOOLS, ...VIEW_TOOLS, ...TABLE_TOOLS, ...NOTATION_TOOLS, ...CHECK_TOOLS, ...FSM_TOOLS, ...CIRCUIT_TOOLS, ...KICAD_TOOLS, ...SCHEMATIC_TOOLS, ...SYMBOL_TOOLS, ...SYMBOL_INFO_TOOLS, ...SIMULATE_DRAWING_TOOLS, ...SOURCE_TOOLS, ...FIND_TOOLS, ...EDITOR_TOOLS, ...TRANSFER_TOOLS, ...MERGE_TOOLS, ...LINK_TOOLS, ...GIT_TOOLS, ...COLLAB_TOOLS, ...HDL_TOOLS, ...VERIFY_TOOLS, ...WCFG_TOOLS, ...HLS_TOOLS, ...PROCESS_TOOLS, ...BOARD_TOOLS, ...CAPTURE_TOOLS, ...TIMING_TOOLS, ...LAB_TOOLS, ...GRADE_TOOLS]);
++  assert.deepEqual(mcp.TOOLS, [...PROJECT_TOOLS, ...SETTINGS_TOOLS, ...NEW_SOURCE_TOOLS, ...WIZARD_TOOLS, ...CONSTRAINTS_TOOLS, ...TEST_BENCH_TOOLS, ...CONVERT_TOOLS, ...VIEW_TOOLS, ...TABLE_TOOLS, ...NOTATION_TOOLS, ...CHECK_TOOLS, ...FSM_TOOLS, ...CIRCUIT_TOOLS, ...KICAD_TOOLS, ...SCHEMATIC_TOOLS, ...SYMBOL_TOOLS, ...SYMBOL_INFO_TOOLS, ...SIMULATE_DRAWING_TOOLS, ...SOURCE_TOOLS, ...FIND_TOOLS, ...EDITOR_TOOLS, ...TRANSFER_TOOLS, ...MERGE_TOOLS, ...LINK_TOOLS, ...GIT_TOOLS, ...COLLAB_TOOLS, ...HDL_TOOLS, ...VERIFY_TOOLS, ...WCFG_TOOLS, ...HLS_TOOLS, ...PROCESS_TOOLS, ...BOARD_TOOLS, ...CAPTURE_TOOLS, ...TIMING_TOOLS, ...IMPLVIEW_TOOLS, ...LAB_TOOLS, ...GRADE_TOOLS]);
+   assert.equal(new Set(names(mcp.TOOLS)).size, mcp.TOOLS.length);
+   for (const t of mcp.TOOLS) {
+     assert.equal(typeof t.run, 'function', t.name);
+diff --git a/test/mcp.test.js b/test/mcp.test.js
+index 1491ef5..fc18c1f 100644
+--- a/test/mcp.test.js
++++ b/test/mcp.test.js
+@@ -65,7 +65,7 @@ test('the handshake: the protocol version, the server, its tools with their sche
+   const { tools } = (await srv.send('tools/list')).result;
+   assert.deepEqual(tools.map(t => t.name), ['list_examples', 'list_projects', 'new_project_from_example', 'new_project', 'set_top', 'project_info', 'read_file', 'write_file',
+     'list_devices', 'set_design_properties', 'set_process_properties', 'set_source_properties', 'new_source', 'clock_manager', 'block_memory', 'constraints_wizard', 'check_constraints', 'test_bench_wizard', 'convert_module', 'convert_drawing', 'related_view', 'set_output_logic', 'set_notation', 'set_schematic_symbols', 'check_drawing', 'set_fsm_outputs', 'set_fsm_look', 'circuit_parts', 'edit_circuit', 'part_libraries', 'import_part', 'export_part', 'rearrange_wires', 'rearrange_schematic', 'move_junction', 'add_markers', 'set_wire_style', 'read_symbol', 'edit_symbol', 'update_symbols', 'place_instance', 'set_instance_width', 'symbol_info', 'simulate_drawing', 'unset_top', 'remove_from_project', 'add_to_project', 'rename_file', 'rename_module', 'delete_file', 'delete_project', 'find_in_project', 'open_in_editor',
+-    'export_project', 'import_project', 'import_source', 'merge_preview', 'merge_contribution', 'undo_merge', 'project_link', 'open_link', 'short_links', 'delete_short_link', 'git_clone', 'git_init', 'git_status', 'git_commit', 'git_push', 'git_pull', 'git_log', 'git_checks', 'git_diff', 'share_project', 'follow_project', 'check_syntax', 'simulate', 'verify', 'save_wave_config', 'load_wave_config', 'c_simulation', 'c_cosimulation', 'c_synthesis_report', 'c_generated', 'run_process', 'get_report', 'program_board', 'capture_settings', 'capture', 'timing_paths', 'lab', 'grade']);
++    'export_project', 'import_project', 'import_source', 'merge_preview', 'merge_contribution', 'undo_merge', 'project_link', 'open_link', 'short_links', 'delete_short_link', 'git_clone', 'git_init', 'git_status', 'git_commit', 'git_push', 'git_pull', 'git_log', 'git_checks', 'git_diff', 'share_project', 'follow_project', 'check_syntax', 'simulate', 'verify', 'save_wave_config', 'load_wave_config', 'c_simulation', 'c_cosimulation', 'c_synthesis_report', 'c_generated', 'run_process', 'get_report', 'program_board', 'capture_settings', 'capture', 'timing_paths', 'fpga_view', 'cross_check', 'lab', 'grade']);
+   // (a tool that deletes or replaces what is in the workspace says so: the client asks before it runs)
+   assert.deepEqual(tools.filter(t => t.annotations.destructiveHint).map(t => t.name), ['set_top', 'write_file', 'set_design_properties', 'set_source_properties', 'clock_manager', 'block_memory', 'convert_module', 'delete_file', 'delete_project', 'find_in_project', 'import_source', 'merge_contribution', 'undo_merge', 'delete_short_link', 'git_pull', 'program_board', 'grade']);
+   for (const t of tools) {
+diff --git a/test/openxc7.test.js b/test/openxc7.test.js
+new file mode 100644
+index 0000000..0dc3483
+--- /dev/null
++++ b/test/openxc7.test.js
+@@ -0,0 +1,126 @@
++// The open 7-series flow of the native tools (openXC7, #openxc7: core/openxc7.js, server/openxc7.js), what needs no
++// program: the XDC as nextpnr-xilinx reads it, nextpnr's log as reports, the parts' names in Project X-Ray's database,
++// which families an open database cross-checks, the steps, the chip database and the database of Toolchain Settings,
++// the Yosys script, the reports of a build folder (a recorded nextpnr log).
++import { test, before, after } from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { nextpnrXdc, nextpnrReports, nextpnrSummary, prjxrayFamily, prjxrayParts, crossCheckability } from '../core/openxc7.js';
++import { openXc7Steps, chipdbOf, prjxrayDbOf, yosysScript, collectOpenXc7Reports, openXc7Status } from '../server/openxc7.js';
++
++let tmp;
++before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'silinx-openxc7-')); });
++after(() => fs.rmSync(tmp, { recursive: true, force: true }));
++
++const LOG = `Info: Device utilisation:
++Info: 	         SLICE_LUTX:    88/29200     0%
++Info: 	          SLICE_FFX:    33/29200     0%
++Info: 	             CARRY4:    10/ 3650     0%
++Info: 	                PAD:     6/  210     2%
++Info: 	           BUFGCTRL:     2/   32     6%
++Info: 	           RAMB18E1:     0/  180     0%
++Info:
++Info: Max frequency for clock 'u_clk/CLK': 310.27 MHz (PASS at 100.00 MHz)
++Info: Routing globals...
++Info: Max frequency for clock 'u_clk/CLK': 296.12 MHz (PASS at 100.00 MHz)
++Info: Max frequency for clock 'u_clk/clk_div': 402.58 MHz (PASS at 12.00 MHz)
++Info: Routing complete.
++Info: Program finished normally.
++`;
++
++test('nextpnrXdc: -dict and single properties per port, the clock\'s frequency, what it leaves out', () => {
++  const x = nextpnrXdc(`## Arty S7-25
++set_property -dict {PACKAGE_PIN R2  IOSTANDARD SSTL135} [get_ports CLK100MHZ]
++create_clock -name sys_clk -period 10.000 [get_ports CLK100MHZ]
++set_property -dict { PACKAGE_PIN E18 IOSTANDARD LVCMOS33 } [get_ports {led[0]}]
++set_property PULLTYPE PULLUP [get_ports btn0] ; # a comment
++set_false_path -from [get_ports btn0]
++set_property CFGBVS VCCO [current_design]`);
++  assert.equal(x.text, ['set_property PACKAGE_PIN R2 [get_ports {CLK100MHZ}]', 'set_property IOSTANDARD SSTL135 [get_ports {CLK100MHZ}]',
++    'set_property PACKAGE_PIN E18 [get_ports {led[0]}]', 'set_property IOSTANDARD LVCMOS33 [get_ports {led[0]}]', 'set_property PULLTYPE PULLUP [get_ports {btn0}]', ''].join('\n'));
++  assert.equal(x.freqMHz, 100);
++  assert.deepEqual(x.ports, ['CLK100MHZ', 'led[0]', 'btn0']);
++  assert.deepEqual(x.dropped, ['set_false_path -from [get_ports btn0]', 'set_property CFGBVS VCCO [current_design]']);
++  assert.deepEqual(nextpnrXdc(''), { text: '', freqMHz: null, ports: [], dropped: [] });
++});
++
++test('nextpnrReports: the utilisation, the last timing estimate of each clock, routed', () => {
++  const r = nextpnrReports(LOG);
++  assert.deepEqual(r.utilization.map(u => [u.name, u.used, u.total]), [['SLICE_LUTX', 88, 29200], ['SLICE_FFX', 33, 29200], ['CARRY4', 10, 3650], ['PAD', 6, 210], ['BUFGCTRL', 2, 32], ['RAMB18E1', 0, 180]]);
++  assert.deepEqual(r.timing.clocks, [{ clock: 'u_clk/CLK', maxFreqMHz: 296.12, targetMHz: 100, pass: true }, { clock: 'u_clk/clk_div', maxFreqMHz: 402.58, targetMHz: 12, pass: true }]);
++  assert.equal(r.timing.met, true);
++  assert.equal(r.timing.maxFreqMHz, 296.12);
++  assert.equal(r.routed, true);
++  const failed = nextpnrReports(LOG.replace('PASS at 12.00', 'FAIL at 500.00') + 'ERROR: something\n');
++  assert.equal(failed.timing.met, false);
++  assert.equal(failed.routed, false);
++  assert.equal(failed.timing.timingErrors, 1);
++  assert.deepEqual(nextpnrReports('').timing, { met: null, timingErrors: 0, maxFreqMHz: null, minPeriodNs: null, clocks: [], model: "nextpnr-xilinx's estimate" });
++  const s = nextpnrSummary(r.utilization);
++  assert.deepEqual(s.luts, { used: 88, total: 29200, percent: 0.3 });
++  assert.deepEqual(s.iobs, { used: 6, total: 210, percent: 2.86 });
++  assert.equal(s.dsp, null);
++});
++
++test('the parts in Project X-Ray\'s database; the families an open database cross-checks', () => {
++  assert.equal(prjxrayFamily('xc7s25csga324-1'), 'spartan7');
++  assert.equal(prjxrayFamily('xc7a35ticsg324-1l'), 'artix7');
++  assert.equal(prjxrayFamily('xc7z020clg400-1'), 'zynq7');
++  assert.equal(prjxrayFamily('xc7k70tfbg484-1'), 'kintex7');
++  assert.equal(prjxrayFamily('xczu3eg-sbva484-1-e'), null);
++  assert.deepEqual(prjxrayParts('xc7a35ticsg324-1L'), ['xc7a35ticsg324-1l', 'xc7a35tcsg324-1l', 'xc7a35tcsg324-1']);
++  assert.deepEqual(prjxrayParts('xc7s25csga324-1'), ['xc7s25csga324-1']);
++  assert.equal(crossCheckability({ part: 'xc7s25' }).open, true);
++  const us = crossCheckability('xczu3eg-sbva484-1-e');
++  assert.equal(us.open, false);
++  assert.equal(us.family, 'UltraScale+');
++  assert.match(us.reason, /^prjuray partial \(UltraScale\+\): not cross-checkable; Vivado-internal checks only/);
++  const versal = crossCheckability('xcvc1902-vsva2197-2MP-e-S');
++  assert.equal(versal.family, 'Versal');
++  assert.match(versal.reason, /^no open bitstream database \(Versal\): not cross-checkable/);
++  assert.equal(crossCheckability('xc3s500e').open, false);
++});
++
++test('the steps; the chip database and Project X-Ray\'s database of Toolchain Settings; the tools not found', () => {
++  assert.deepEqual(openXc7Steps([]), ['synth', 'translate', 'map', 'par', 'trce', 'bitgen']);
++  assert.deepEqual(openXc7Steps(['bitgen', 'par']), ['par', 'trce', 'bitgen']);
++  assert.deepEqual(openXc7Steps(['fpgaview']), ['fpgaview']);
++  assert.throws(() => openXc7Steps(['postsynth']), /the open 7-series flow \(openXC7\) has no step 'postsynth'/);
++  const chip = path.join(tmp, 'xc7s25csga324-1_new.chipdb'), dir = path.join(tmp, 'chipdbs');
++  fs.writeFileSync(chip, '');
++  fs.mkdirSync(dir); fs.writeFileSync(path.join(dir, 'xc7a35tcsg324-1.bin'), '');
++  const cfg = { openxc7: { chipdbs: { 'xc7s25csga324-1': chip }, chipdbDir: dir, prjxrayDb: path.join(tmp, 'db') } };
++  assert.equal(chipdbOf(cfg, 'xc7s25csga324-1'), chip);
++  assert.equal(chipdbOf(cfg, 'xc7a35tcsg324-1'), path.join(dir, 'xc7a35tcsg324-1.bin'));
++  assert.equal(chipdbOf(cfg, 'xc7a100tcsg324-1'), null);
++  fs.mkdirSync(path.join(tmp, 'db', 'artix7', 'xc7a35tcsg324-1'), { recursive: true });
++  fs.writeFileSync(path.join(tmp, 'db', 'artix7', 'xc7a35tcsg324-1', 'part.yaml'), '');
++  assert.deepEqual(prjxrayDbOf(cfg, 'xc7a35ticsg324-1L'), { root: path.join(tmp, 'db', 'artix7'), part: 'xc7a35tcsg324-1' });
++  assert.equal(prjxrayDbOf(cfg, 'xc7s25csga324-1'), null);
++  const st = openXc7Status({ paths: { yosys: path.join(tmp, 'none'), 'nextpnr-xilinx': path.join(tmp, 'none'), fasm2frames: path.join(tmp, 'none'), xc7frames2bit: path.join(tmp, 'none'), bit2fasm: path.join(tmp, 'none') } }, null);
++  assert.equal(st.available, false);
++  assert.equal(st.reason, 'yosys, nextpnr-xilinx, fasm2frames, xc7frames2bit not found');
++});
++
++test('the Yosys script: Verilog read deferred, or the front end\'s flat module', () => {
++  assert.equal(yosysScript({ top: 't', sources: ['../src/a.v', '../src/b.v'] }),
++    'read_verilog -defer -sv ../src/a.v\nread_verilog -defer -sv ../src/b.v\nsynth_xilinx -flatten -nodsp -arch xc7 -top t\ndelete t:$scopeinfo\ntee -o synth_stat.txt stat\nwrite_json synth.json\n');
++  assert.match(yosysScript({ top: 't', sources: [], flat: 't_flat.sv' }), /^read_verilog -sv t_flat\.sv\nsynth_xilinx/);
++});
++
++test('the reports of a build folder: Yosys\'s statistics, nextpnr\'s log, the bitstream', async () => {
++  const b = path.join(tmp, 'build'), o = path.join(b, 'openxc7');
++  fs.mkdirSync(o, { recursive: true });
++  fs.writeFileSync(path.join(o, 'synth_stat.txt'), '=== top ===\n\n       88 wires\n       48 cells\n       10   CARRY4\n       33   FDRE\n        5   LUT2\n');
++  fs.writeFileSync(path.join(o, 'yosys.log'), 'Warning: one\nother\n');
++  fs.writeFileSync(path.join(o, 'nextpnr.log'), LOG);
++  fs.writeFileSync(path.join(o, 'top.bit'), Buffer.alloc(100));
++  const r = await collectOpenXc7Reports(b, 'top', { part: 'xc7s25' });
++  assert.equal(r.source, 'openxc7');
++  assert.deepEqual(r.synthesis.utilization, [{ name: 'CARRY4', used: 10 }, { name: 'FDRE', used: 33 }, { name: 'LUT2', used: 5 }]);
++  assert.equal(r.synthesis.warnings, 1);
++  assert.deepEqual(r.summary, { synthesized: true, mapped: true, routed: true, timingMet: true, maxFreqMHz: 296.12, utilization: r.map.summary, drc: null, bitstream: true });
++  assert.equal(r.bit.size, 100);
++});
+diff --git a/test/tool-descriptors.test.js b/test/tool-descriptors.test.js
+index 6dd3927..618acc5 100644
+--- a/test/tool-descriptors.test.js
++++ b/test/tool-descriptors.test.js
+@@ -3,7 +3,7 @@
+ import { test } from 'node:test';
+ import assert from 'node:assert/strict';
+ import fs from 'node:fs';
+-import { ISE, NO_FLOW, DESIGN_ONLY, SILINX, SILINX_ICE40, SILINX_XC7, SILINX_ECP5, SILINX_GOWIN, VIVADO, TOOLS, allTasks, buildProcesses, hasTask, simModelsOf, toolOf, MESSAGE_LINE, EXTRA_STEPS, IMPL_IDS } from '../web/js/tool-descriptors.js';
++import { ISE, NO_FLOW, DESIGN_ONLY, SILINX, SILINX_ICE40, SILINX_XC7, SILINX_ECP5, SILINX_GOWIN, VIVADO, OPENXC7, CROSS_CHECK, TOOLS, allTasks, buildProcesses, hasTask, simModelsOf, toolOf, MESSAGE_LINE, EXTRA_STEPS, IMPL_IDS } from '../web/js/tool-descriptors.js';
+ import { XILINX_STEPS, orderSteps } from '../packages/silinx-fpga/src/open-steps.js';
+ import { ICE40_STEPS } from '../packages/silinx-fpga/src/open-flow-ice40.js';
+ import { XC7_STEPS } from '../packages/silinx-fpga/src/open-flow-xc7.js';
+@@ -281,10 +281,13 @@ test('#1649 AMD Vivado on the Artix-7 (the local server): ISE\'s step names, Viv
+   assert.equal(toolOf({ part: 'xc3s250e' }, true, { standalone: false }), SILINX);
+   const t = built(VIVADO);
+   assert.deepEqual(t.map(shape), ['summary', 'constraints', { synth: ['rtl', 'check', 'cmodel'] },
+-    { impl: [{ translate: [] }, { map: [] }, { par: ['trce', 'xpwr', 'pin2ucf'] }] }, 'bitgen', 'emulate', { config: ['impact'] }]);
++    { impl: [{ translate: [] }, { map: [] }, { par: ['trce', 'xpwr', 'pin2ucf', 'fpgaview', 'crosscheck'] }] }, 'bitgen', 'emulate', { config: ['impact'] }]);
+   assert.equal(find(t, 'synth').label, 'Synthesize - Vivado');
++  // (its FPGA view implview's, #implview; Cross-Check, #crosscheck: optional, the interface gives it its action)
++  assert.equal(find(t, 'crosscheck').label, CROSS_CHECK);
++  assert.ok(!find(built(VIVADO, { actions: { ...allActions(VIVADO), crosscheck: undefined } }), 'crosscheck'));
+   for (const id of ['synth', 'impl', 'bitgen']) assert.equal(find(t, id).title, 'AMD Vivado', id);
+-  assert.deepEqual(VIVADO.steps.map(s => s.id), ['synth', 'translate', 'map', 'par', 'trce', 'pin2ucf', 'xpwr', 'bitgen']);
++  assert.deepEqual(VIVADO.steps.map(s => s.id), ['synth', 'translate', 'map', 'par', 'trce', 'pin2ucf', 'xpwr', 'bitgen', 'fpgaview']);
+   assert.ok(orderSteps(VIVADO.steps, ['bitgen']).includes('par'));
+   // what each step produces: run.tcl's files (server/vivado.js)
+   const tcl = read('server/vivado.js');
+@@ -349,3 +352,20 @@ test('#3704 Emulate in every flow, on the HDL and the board\'s pins; its models
+   assert.deepEqual(simModelsOf(SILINX), ['postsynth', 'posttrans', 'postmap', 'postpar']);
+   for (const tool of [SILINX_ICE40, SILINX_XC7, VIVADO, SILINX_ECP5, SILINX_GOWIN, NO_FLOW]) assert.deepEqual(simModelsOf(tool), [], tool.id);
+ });
++
++test('the open 7-series flow (openXC7, #openxc7): any 7-series device with the project\'s synthesis tool openxc7, the local server\'s; its tree, steps and products', () => {
++  for (const part of ['xc7a35t', 'xc7s25', 'xc7z020', 'xc7k70t']) {
++    assert.equal(toolOf({ part }, false, { openxc7: true }), OPENXC7, part);
++    assert.equal(toolOf({ part }, false, { openxc7: true, standalone: true }), toolOf({ part }, false, { standalone: true }), `${part}: none in the browser edition`);
++  }
++  assert.equal(toolOf({ part: 'xc3s250e' }, false, { openxc7: true }), ISE, 'not a 7-series');
++  const t = built(OPENXC7);
++  assert.deepEqual(t.map(shape), ['summary', 'constraints', { synth: ['rtl', 'check', 'cmodel'] },
++    { impl: [{ translate: [] }, { map: [] }, { par: ['trce', 'fpgaview', 'crosscheck'] }] }, 'bitgen', 'emulate', { config: ['impact'] }]);
++  assert.equal(find(t, 'synth').label, 'Synthesize - Yosys (openXC7)');
++  const src = read('server/openxc7.js');
++  assert.deepEqual(OPENXC7.steps.map(s => s.id), ['synth', 'translate', 'map', 'par', 'trce', 'bitgen', 'fpgaview']);
++  for (const s of OPENXC7.steps) for (const f of s.produces) assert.ok(src.includes(f.replace(/^openxc7\//, '').replace(/^\{top\}/, '').replace('{top}', '${top}')), `${s.id}: ${f}`);
++  for (const r of OPENXC7.reports) assert.ok(OPENXC7.steps.find(s => s.id === r.step).produces.includes(r.file), r.id);
++  assert.deepEqual([OPENXC7.constraints.format, OPENXC7.program.file, OPENXC7.open], ['xdc', '{top}.bit', false]);
++});
+diff --git a/test/vivado.test.js b/test/vivado.test.js
+index 3d8ccb8..68a5462 100644
+--- a/test/vivado.test.js
++++ b/test/vivado.test.js
+@@ -69,7 +69,7 @@ test('the 7-series devices are Vivado\'s; part names; the steps of a request, IS
+   assert.deepEqual(V.vivadoSteps(ise.normalizeSteps(['synth', 'translate', 'map', 'par', 'bitgen'])), ['synth', 'translate', 'map', 'par', 'trce', 'bitgen', 'prombit']);
+   assert.deepEqual(V.vivadoSteps(['xpwr', 'pin2ucf']), ['pin2ucf', 'xpwr']);
+   assert.throws(() => V.vivadoSteps(['synth', 'postsynth']), /^Error: Vivado's flow has no post-synthesis simulation model \(postsynth\)$/);
+-  assert.throws(() => V.vivadoSteps(['fpgaview']), /no FPGA view \(fpgaview\)/);
++  assert.deepEqual(V.vivadoSteps(['fpgaview']), ['fpgaview']);   // (implview's export of the routed checkpoint, #implview)
+ });
+ 
+ test('the board\'s configuration: CFGBVS and CONFIG_VOLTAGE (VCCO, 3.3 V by default), its flash\'s bus width and rate; bad values ignored', () => {
+diff --git a/test/xise-routes.test.js b/test/xise-routes.test.js
+index b87560d..aea1736 100644
+--- a/test/xise-routes.test.js
++++ b/test/xise-routes.test.js
+@@ -23,7 +23,7 @@ test('#405 ISE project routes: mounted alone, the .xise and zip routes', () => {
+ test('#405 ISE project routes: registerImplRoutes registers them after its own, then Merge Contribution\'s (#4206), then KiCad\'s libraries\' (#4285)', () => {
+   const { api, calls } = recorder();
+   registerImplRoutes(api, { wrap: f => f, projects });
+-  assert.equal(calls.length, 28);
++  assert.equal(calls.length, 29);   // (and Cross-Check's, #crosscheck)
+   assert.ok(calls.includes('post /projects/:p/capture'), 'the capture of the logic analyzer (#3176)');
+   assert.deepEqual(calls.slice(-12, -7), ['get /projects/:p/export.xise', 'post /projects/import-xise', 'get /projects/:p/export.zip', 'post /projects/import-zip', 'post /projects/:p/sync-xise']);
+   assert.deepEqual(calls.slice(-7, -4), ['post /projects/:p/merge-preview', 'post /projects/:p/merge', 'post /projects/:p/undo-merge']);
+diff --git a/web/js/api.js b/web/js/api.js
+index ccbea5d..871f0e9 100644
+--- a/web/js/api.js
++++ b/web/js/api.js
+@@ -129,6 +129,7 @@ export const api = {
+   capture: (name, body) => req('POST', `/api/projects/${enc(name)}/capture`, body),
+   reports: name => req('GET', `/api/projects/${enc(name)}/reports`),
+   fpgaView: name => req('GET', `/api/projects/${enc(name)}/fpga-view`),
++  crossCheck: name => req('POST', `/api/projects/${enc(name)}/crosscheck`, {}),   // (#crosscheck: a job)
+   bitinfo: name => req('GET', `/api/projects/${enc(name)}/bitinfo`),
+   program: body => req('POST', '/api/program', body),
+   scan: body => req('POST', '/api/jtag/scan', body),
+diff --git a/web/js/crosscheck.js b/web/js/crosscheck.js
+new file mode 100644
+index 0000000..5c598d5
+--- /dev/null
++++ b/web/js/crosscheck.js
+@@ -0,0 +1,27 @@
++// Silinx - Cross-Check (#crosscheck): a 7-series build of AMD Vivado or of the open 7-series flow checked against its
++// bitstream on the server (server/crosscheck.js), its lines and its report in the console; the report is also
++// build/crosscheck.txt.
++import { api, followJob } from './api.js';
++import { S } from './app.js';
++import { log } from './console.js';
++import { CROSS_CHECK } from './tool-descriptors.js';
++import { renderProcesses } from './processes.js';
++
++export async function runCrossCheck() {
++  if (!S.project) return;
++  log(`\nStarted : "${CROSS_CHECK}".\n`, 'hdr');
++  S.status.crosscheck = 'running';
++  renderProcesses();
++  let res;
++  try {
++    const { job } = await api.crossCheck(S.project.name);
++    res = await followJob(job, line => log(line, /^ERROR/.test(line) ? 'err' : /^(CRITICAL )?WARNING|MISMATCH|DIFFERS/.test(line) ? 'warn' : undefined));
++  } catch (e) { res = { status: 'error', error: e.message }; }
++  const ok = res.status === 'ok';
++  const consistent = ok && (!res.result?.openxc7 || (res.result.openxc7.fasm.consistent && res.result.openxc7.frames.identical));
++  S.status.crosscheck = !ok ? 'err' : consistent && res.result?.checkable !== false ? 'ok' : 'warn';
++  renderProcesses();
++  if (ok) log(`\nProcess "${CROSS_CHECK}" completed successfully: the report is build/crosscheck.txt`, 'ok');
++  else log(`ERROR: ${CROSS_CHECK}: ${res.error || 'failed'}`, 'err');
++  return ok;
++}
+diff --git a/web/js/device-picker.js b/web/js/device-picker.js
+index 8e88b75..cf8204b 100644
+--- a/web/js/device-picker.js
++++ b/web/js/device-picker.js
+@@ -17,6 +17,8 @@ export const noFlowWarning = device => (experimentalDevice(device) && !vivadoDev
+ /** The synthesis tools of an Artix-7 project on the local server (#3146): AMD Vivado's flow, or the Silinx toolchain's; a
+  *  Vivado-only family's (#3895) the first alone. */
+ const VIVADO_TOOLS = [['vivado', 'Vivado (VHDL/Verilog; AMD Vivado 2025.2)'], ['silinx', 'Silinx (VHDL/Verilog; no Vivado needed; on trial)']];
++// (the open 7-series flow of the native tools, any 7-series device: #openxc7)
++const OPENXC7_TOOL = ['openxc7', 'openXC7 (Yosys + nextpnr-xilinx; no Vivado needed)'];
+ 
+ // Cascading Family -> Device -> Package -> Speed selectors over the device database.
+ export function devicePicker(db, device) {
+@@ -70,7 +72,7 @@ export function devicePicker(db, device) {
+       };
+       (fitSynth = () => {
+         const d = { part: partSel.value };
+-        if (vivadoDevice(d) && !api.standalone) { const only = !openFlowDevice(d); fill(only ? VIVADO_TOOLS.slice(0, 1) : VIVADO_TOOLS); sel.disabled = only; return; }
++        if (vivadoDevice(d) && !api.standalone) { const only = !openFlowDevice(d); fill([...(only ? VIVADO_TOOLS.slice(0, 1) : VIVADO_TOOLS), OPENXC7_TOOL]); sel.disabled = false; return; }
+         fill(own);
+         const o = openOnlyDevice(d) || experimentalDevice(d);
+         if (o) sel.value = 'silinx';
+diff --git a/web/js/fpgaview-details.js b/web/js/fpgaview-details.js
+index 3f48697..01e4bbc 100644
+--- a/web/js/fpgaview-details.js
++++ b/web/js/fpgaview-details.js
+@@ -95,7 +95,8 @@ export function mountSiteDetails(ctx) {
+   // how the function is implemented: the LUT is a small memory addressed by its inputs
+   function lutContents(c, inst) {
+     let t;
+-    try { t = lutTable(c.eq, /^[A-D]6?LUT$/.test(c.bel) ? 6 : 4); } catch { return null; }
++    // (a cell's size: the 7-series' LUTs, 6, #implview)
++    try { t = lutTable(c.eq, c.size || (/^[A-D]6?LUT$/.test(c.bel) ? 6 : 4)); } catch { return null; }
+     const name = a => short((c.inputs || {})[a] || a);
+     const box = h('div', { class: 'fv-lut' });
+     if (c.thru) box.append(h('div', { class: 'fv-hint' }, 'Route-thru: the LUT only passes a signal through (used as a wire).'));
+diff --git a/web/js/fpgaview.js b/web/js/fpgaview.js
+index 0692625..8cf609c 100644
+--- a/web/js/fpgaview.js
++++ b/web/js/fpgaview.js
+@@ -26,7 +26,7 @@ const PALETTE = ['#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#b07aa1', '#76b7b2
+   '#d37295', '#a0cbe8', '#8cd17d', '#ffbe7d', '#f1ce63', '#499894', '#bab0ac', '#d4a6c8', '#fabfd2', '#79706e'];
+ const TOP_COLOR = '#8a94a6';
+ export const isSlice = t => /^SLICE/.test(t);
+-export const isIo = t => /^(IOB|IBUF|DIFF[MS]I?|IOBM|IOBS)$/.test(t);
++export const isIo = t => /^(IOB|IBUF|DIFF[MS]I?|IOBM|IOBS|IOB(18|33)[MS]?)$/.test(t);   // (the 7-series' IOB33 / IOB18, #implview)
+ const siteXY = name => { const m = /_X(\d+)Y(\d+)$/.exec(name); return m ? [+m[1], +m[2]] : null; };
+ 
+ /** Geometry of every site of the device: { name -> { x, y, w, h, type, bonded, tile } }. */
+diff --git a/web/js/i18n-fpga.js b/web/js/i18n-fpga.js
+index edb2ab0..6dca0cf 100644
+--- a/web/js/i18n-fpga.js
++++ b/web/js/i18n-fpga.js
+@@ -2,6 +2,14 @@
+ // (web/js/timing-paths.js, #3178), merged into web/js/i18n.js.
+ export const FPGA_PT = {
+   'View Implemented Design (FPGA)': 'Ver Projeto Implementado (FPGA)',
++  // a 7-series build of AMD Vivado or of the open 7-series flow (#implview, #openxc7, #crosscheck)
++  'Cross-Check Implementation against Bitstream': 'Verificar a Implementação contra o Bitstream',
++  'Synthesize - Yosys (openXC7)': 'Sintetizar - Yosys (openXC7)',
++  'Open 7-series flow (openXC7)': 'Fluxo aberto da série 7 (openXC7)',
++  'openXC7 (Yosys + nextpnr-xilinx; no Vivado needed)': 'openXC7 (Yosys + nextpnr-xilinx; sem o Vivado)',
++  'Place & Route Report (nextpnr)': 'Relatório de Place & Route (nextpnr)',
++  'Device Utilization Summary (openXC7)': 'Resumo da Utilização do Dispositivo (openXC7)',
++  'Timing (post Place & Route, nextpnr\'s estimate)': 'Temporização (depois de Place & Route, estimativa do nextpnr)',
+   'Implemented Design (FPGA View)': 'Projeto Implementado (Vista da FPGA)',
+   'Set the top module of the project first.': 'Defina primeiro o módulo de topo do projeto.',
+   'The FPGA view shows the design after Place & Route. Run Implement Design (Synthesize, Translate, Map, Place & Route) now?': 'A vista da FPGA mostra o projeto depois de Place & Route. Executar agora Implement Design (Synthesize, Translate, Map, Place & Route)?',
+@@ -56,6 +64,7 @@ export const FPGA_PT_PATTERNS = [
+   [/^(\S+) \((\S+)\): not used$/, '$1 ($2): não usada'],
+   [/^address ([01]+) → ([01])$/, 'endereço $1 → $2'],
+   [/^Inside (\S+)$/, 'Dentro de $1'],
++  [/^Process "Cross-Check Implementation against Bitstream" completed successfully: the report is (\S+)$/, 'O processo "Verificar a Implementação contra o Bitstream" terminou com sucesso: o relatório é $1'],
+   [/^(\d+) of (\d+) slices · (\d+) I\/Os$/, '$1 de $2 slices · $3 E/S'],   // (the status line's, #2763)
+   [/^The implemented design could not be read: (.*)$/s, 'Não foi possível ler o projeto implementado: $1'],
+   // the timing report's Paths panel (#3178)
+diff --git a/web/js/implement.js b/web/js/implement.js
+index f1fd898..507376a 100644
+--- a/web/js/implement.js
++++ b/web/js/implement.js
+@@ -13,7 +13,7 @@ import { log, logError, logInfo, logLine, showConsolePage, showProblems, setDiag
+ import { showCommandLines } from './messages.js';
+ import { reloadProject } from './project.js';
+ import { refreshOpenEditor, topUcfPorts, ucfPort } from './drawings.js';
+-import { EXTRA_STEPS, IMPL_IDS, SIM_MODEL_NAMES, checkSyntax, loadUcfText, openMode, projectTool, renderProcesses, vivadoMode,
++import { EXTRA_STEPS, IMPL_IDS, SIM_MODEL_NAMES, checkSyntax, loadUcfText, openMode, openXc7Mode, projectTool, renderProcesses, vivadoMode,
+   saveAll, saveImplStatus, setStatus, synthFingerprint } from './processes.js';
+ import { inView, saveProjectJson, setTop } from './design.js';
+ import { OPEN_SYNTH, SYNTH_OPEN } from './tool-descriptors.js';
+@@ -236,7 +236,7 @@ async function runImplInner(mod, steps, opts, pjName) {
+   S.diags = S.diags.filter(d => d.source !== 'console');   // new run: drop the previous run's messages
+   const extra = [...steps].reverse().find(st => EXTRA_STEPS[st] && st !== 'trce') || (opts.timing ? 'trce' : null);
+   const procId = extra || (steps.includes('bitgen') ? 'bitgen' : steps.includes('translate') ? 'impl' : 'synth');
+-  const procName = EXTRA_STEPS[procId] || { synth: openMode() ? OPEN_SYNTH : vivadoMode() ? 'Synthesize - Vivado' : 'Synthesize - XST', impl: 'Implement Design', bitgen: 'Generate Programming File' }[procId];
++  const procName = EXTRA_STEPS[procId] || { synth: openMode() ? OPEN_SYNTH : openXc7Mode() ? 'Synthesize - Yosys (openXC7)' : vivadoMode() ? 'Synthesize - Vivado' : 'Synthesize - XST', impl: 'Implement Design', bitgen: 'Generate Programming File' }[procId];
+   // Synthesize - XST always starts with Check Syntax (same messages as the Check Syntax process)
+   if (!await checkSyntax(mod)) {
+     setStatus('synth', 'err');
+@@ -286,7 +286,7 @@ async function runImplInner(mod, steps, opts, pjName) {
+     // (the Silinx toolchain runs without ISE: a project whose synthesis is Silinx's, or a family ISE does not implement;
+     // a device of Vivado's runs AMD Vivado, #1649)
+     const vivado = vivadoMode();
+-    const ran = openMode() || (vivado ? !!tc.vivado?.available : tc.ise.available);
++    const ran = openMode() || openXc7Mode() || (vivado ? !!tc.vivado?.available : tc.ise.available);
+     if (!ran && vivado) {
+       log(`AMD Vivado not available (${tc.vivado?.mode} mode): ${tc.vivado?.reason}`, 'warn');
+       log('The build directory, run.tcl and run.sh are still generated so they can be run on a machine with Vivado 2025.2. Configure it in Toolchain Settings (the gear in the toolbar).', 'info');
+diff --git a/web/js/processes.js b/web/js/processes.js
+index d7dd961..22e58b0 100644
+--- a/web/js/processes.js
++++ b/web/js/processes.js
+@@ -41,10 +41,12 @@ const SUMMARY_PROC = { id: 'summary', label: 'Design Summary/Reports', ico: 'sum
+ // (the browser edition: the Silinx toolchain, unless the project chose XST)
+ // (a device of Vivado's, on the local server: AMD Vivado's, #1649, unless the project's synthesis tool is Silinx: the Silinx
+ // toolchain's 7-series back end, on trial: the 7-series an experimental family, #3146; a Vivado-only family's, #3895, whatever it says)
+-export const vivadoMode = () => !api.standalone && vivadoDevice(S.project?.device) && (S.project?.synthTool !== 'silinx' || !openFlowDevice(S.project?.device));
++export const vivadoMode = () => !api.standalone && vivadoDevice(S.project?.device) && !openXc7Mode() && (S.project?.synthTool !== 'silinx' || !openFlowDevice(S.project?.device));
++// (the open 7-series flow of the native tools, the project's synthesis tool openXC7, #openxc7: the local server's)
++export const openXc7Mode = () => !api.standalone && vivadoDevice(S.project?.device) && S.project?.synthTool === 'openxc7';
+ export const openMode = () => !vivadoMode() && (openOnlyDevice(S.project?.device) || (S.project?.synthTool ? S.project.synthTool === 'silinx' : api.standalone || S.toolchain?.config?.mode === 'silinx'));
+ /** The project's tool (its descriptor, web/js/tool-descriptors.js): what the process tree and the tasks are built from. */
+-export const projectTool = () => toolOf(S.project?.device, openMode(), { standalone: api.standalone, designOnly: designOnly() });
++export const projectTool = () => toolOf(S.project?.device, openMode(), { standalone: api.standalone, designOnly: designOnly(), openxc7: openXc7Mode() });
+ // Tasks ▸ Implement: the top module's processes, whatever the Design pane has selected since (#1208)
+ const implTop = () => { const d = document.documentElement.dataset; return d.layout === 'tasks' && d.task === 'impl'; };
+ /** The item whose processes are shown and the view: the selection's, or in Implement the top module's. */
+@@ -112,6 +114,8 @@ function selectionProcesses(sel, view) {
+         ...simModelActions(top),
+         'synth-open': () => synthOpen(top), trce: () => postParTiming(top), xpwr: () => textPowerReport(top),
+         pin2ucf: () => backAnnotatePins(top), fpgaview: () => openFpgaView(top), config: () => openImpact(), impact: () => openImpact(),
++        // (Cross-Check, #crosscheck: a 7-series build of AMD Vivado or of the open flow, web/js/crosscheck.js)
++        ...(['vivado', 'openxc7'].includes(projectTool().id) ? { crosscheck: async () => (await import('./crosscheck.js')).runCrossCheck() } : {}),
+         // (the logic analyzer, #3176: web/js/capture-ui.js)
+         capture: async () => (await import('./capture-ui.js')).runCaptureOnBoard(),
+         'capture-settings': async () => (await import('./capture-ui.js')).captureSettings(),
+diff --git a/web/js/summary.js b/web/js/summary.js
+index 4e043bf..ce06eba 100644
+--- a/web/js/summary.js
++++ b/web/js/summary.js
+@@ -34,20 +34,22 @@ export function mountSummary(el) {
+     const open = rep?.source === 'open';
+     // made by AMD Vivado (a 7-series device, #1649): its reports are build/<top>_*.rpt
+     const vivado = rep?.source === 'vivado';
++    // made by the open 7-series flow (openXC7, #openxc7): its reports in build/openxc7/
++    const openxc7 = rep?.source === 'openxc7';
+     // (its caption the Tasks interface's only, where the tables are cards side by side: their tops in line, #1409)
+     page.append(h('table', { class: 'summary-table' }, h('caption', { class: 'summary-status' }, 'Project Status'),
+       row('Project File:', `${pj.name}/silinx.json`, 'Parser Errors:', h('span', { class: errs ? 'status-bad' : 'status-good' }, errs ? `${errs} Errors` : 'No Errors')),
+       row('Module Name:', pj.top || '(not set)', 'Implementation State:', implState),
+       row('Target Device:', `${pj.device.part}${pj.device.speed}-${pj.device.package}`, 'Warnings:', warns ? `${warns} Warnings` : 'No Warnings'),
+       row('Board:', board ? board.name : 'None Specified', 'Test Benches:', String((pj.files || []).filter(f => f.role === 'sim').length)),
+-      row('Product Version:', `${PRODUCT} ${VERSION_LABEL} (${open ? 'Silinx toolchain, no ISE' : vivado ? 'AMD Vivado 2025.2 flow' : 'Xilinx ISE 14.7 flow'})`, 'Constraints:', pj.constraints || '(none)'),
++      row('Product Version:', `${PRODUCT} ${VERSION_LABEL} (${open ? 'Silinx toolchain, no ISE' : vivado ? 'AMD Vivado 2025.2 flow' : openxc7 ? 'open 7-series flow, openXC7' : 'Xilinx ISE 14.7 flow'})`, 'Constraints:', pj.constraints || '(none)'),
+       row('Design Goal:', `Balanced (${pj.impl?.optMode || 'Speed'})`, 'Sources:', `${pj.files.length} HDL files`),
+     ));
+     // utilization: every resource of the part (packages/silinx-fpga/src/resources.js, #790), used of available (#795): MAP's report's
+     // lines (and the part's resources it does not list, ISE's leaves the unused ones out), or before an
+     // implementation the synthesis's (the Silinx toolchain's), or the part's counts alone
+     const syn = open || vivado ? (rep?.synthesis?.utilization || []).filter(u => u.total && !u.level) : [];
+-    const caption = rep?.map ? (open ? ' (Silinx toolchain)' : vivado ? ' (AMD Vivado)' : '') : syn.length ? ' (after synthesis)' : ' (not yet implemented)';
++    const caption = rep?.map ? (open ? ' (Silinx toolchain)' : vivado ? ' (AMD Vivado)' : openxc7 ? ' (openXC7)' : '') : syn.length ? ' (after synthesis)' : ' (not yet implemented)';
+     const tbl = h('table', { class: 'summary-table' }, h('caption', {}, `Device Utilization Summary${caption}`),
+       h('tr', {}, h('th', {}, 'Logic Utilization'), h('th', {}, 'Used'), h('th', {}, 'Available'), h('th', {}, 'Utilization'), h('th', {}, '')));
+     const res = part ? resourcesOf(part, pj.device.package).filter(r => r.report && r.count) : [];
+@@ -82,10 +84,10 @@ export function mountSummary(el) {
+     const tm = rep?.timing;
+     if (tm) {
+       // (#2300: the iCE40's, the ECP5's and the Gowin's timing nextpnr's own analysis)
+-      const timingCaption = !open ? 'Timing (post Place & Route)' : tm.model ? 'Timing (post Place & Route, nextpnr\'s estimate: conservative against Vivado)'
++      const timingCaption = openxc7 ? 'Timing (post Place & Route, nextpnr\'s estimate)' : !open ? 'Timing (post Place & Route)' : tm.model ? 'Timing (post Place & Route, nextpnr\'s estimate: conservative against Vivado)'
+         : tm.engine === 'nextpnr' ? 'Timing (post Place & Route, nextpnr\'s analysis)' : 'Timing (post Place & Route, Silinx toolchain estimate)';
+       page.append(h('table', { class: 'summary-table' }, h('caption', {}, timingCaption),
+-        h('tr', {}, h('th', {}, 'Timing Constraints'), h('td', { class: tm.met === false ? 'status-bad' : 'status-good' }, tm.met === false ? (open ? `Not met (${tm.timingErrors} constraints)` : vivado ? `Not met (${tm.timingErrors} failing endpoints)` : `Not met (${tm.timingErrors} errors, score ${tm.score})`) : 'All constraints met')),
++        h('tr', {}, h('th', {}, 'Timing Constraints'), h('td', { class: tm.met === false ? 'status-bad' : 'status-good' }, tm.met === false ? (open || openxc7 ? `Not met (${tm.timingErrors} constraints)` : vivado ? `Not met (${tm.timingErrors} failing endpoints)` : `Not met (${tm.timingErrors} errors, score ${tm.score})`) : 'All constraints met')),
+         tm.minPeriodNs ? h('tr', {}, h('th', {}, 'Minimum period'), h('td', {}, `${tm.minPeriodNs} ns (maximum frequency ${tm.maxFreqMHz} MHz)`)) : null,
+         ...(tm.constraints || []).map(c => h('tr', {}, h('th', {}, c.name), h('td', {}, `${c.constraint} — ${c.timingErrors ? `${c.timingErrors} errors` : 'met'}, ${c.minPeriodNs == null ? 'no path between flip-flops to time' : `${c.minPeriodNs} ns`}`))),
+         // (a clock no constraint asks for: nextpnr's, its frequency alone)
+diff --git a/web/js/tool-descriptors.js b/web/js/tool-descriptors.js
+index 620ccd6..8051d74 100644
+--- a/web/js/tool-descriptors.js
++++ b/web/js/tool-descriptors.js
+@@ -21,6 +21,8 @@ export const EXTRA_STEPS = {
+   pin2ucf: 'Back-annotate Pin Locations', xpwr: 'Generate Text Power Report', trce: 'Generate Post-Place & Route Static Timing',
+   fpgaview: 'View Implemented Design (FPGA)',
+ };
++// Cross-Check (#crosscheck): a 7-series build against its bitstream (AMD Vivado's, the open 7-series flow's: server/crosscheck.js)
++export const CROSS_CHECK = 'Cross-Check Implementation against Bitstream';
+ // the implementation runs (one build directory: exclusive), and every process whose mark is kept in the build folder
+ export const FLOW_PROCS = ['synth', 'impl', 'translate', 'map', 'par', 'bitgen'];
+ export const IMPL_IDS = ['synth', 'translate', 'map', 'par', 'impl', 'bitgen', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'xpwr', 'trce', 'fpgaview'];
+@@ -55,6 +57,7 @@ const XILINX_TREE = [
+       simModel('postpar', 'implements'),
+       proc('pin2ucf', EXTRA_STEPS.pin2ucf, implement),
+       proc('fpgaview', EXTRA_STEPS.fpgaview, { ...implement, ico: 'chip' }),
++      proc('crosscheck', CROSS_CHECK, { ...implement, optional: true }),   // (AMD Vivado's and the open 7-series flow's only)
+     ]),
+   ]),
+   proc('bitgen', 'Generate Programming File', { ...implement, flow: upTo('bitgen') }),
+@@ -169,7 +172,7 @@ export const ISE = {
+   constraints: UCF,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit', prom: '{top}_prom.bit' },
+-  tree: treeOf(['capture']),
++  tree: treeOf(['crosscheck', 'capture']),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -191,7 +194,7 @@ export const SILINX = {
+   constraints: UCF,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit', prom: '{top}_prom.bit' },
+-  tree: treeOf(['synth-open'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'synth-open'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -212,7 +215,7 @@ export const SILINX_ICE40 = {
+   // (#2298: no JTAG chain and no PROM; the .bin written into the board's SPI flash: openFPGALoader in the local server, WebUSB
+   // in the browser edition; the page web/js/program-open.js, as the ECP5's and the Gowin's)
+   program: { process: 'config', page: 'program-open', title: 'Program Flash', target: 'spi-flash', file: '{top}.bin' },
+-  tree: treeOf(['synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -234,7 +237,7 @@ export const SILINX_XC7 = {
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit' },
+   // (the logic analyzer: Implement inserts its core with a BSCANE2, #3767)
+-  tree: treeOf(['synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -254,7 +257,7 @@ export const SILINX_ECP5 = {
+   constraints: LPF,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'program-open', title: 'Program FPGA', target: 'sram', file: '{top}.bit' },
+-  tree: treeOf(['synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -272,7 +275,7 @@ export const SILINX_GOWIN = {
+   constraints: CST,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'program-open', title: 'Program FPGA', target: 'sram', file: '{top}.fs' },
+-  tree: treeOf(['synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
++  tree: treeOf(['crosscheck', 'synth-open', 'map', 'xpwr', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'fpgaview', 'tech', 'capture'], SILINX_CHANGE),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -302,14 +305,15 @@ export const DESIGN_ONLY = {
+ 
+ /** AMD Vivado on the 7-series (#1649, server/vivado.js): ISE's step names, each a Vivado command (synth_design, opt_design as
+  *  Map, place_design and route_design, report_timing_summary, report_io, report_power, write_bitstream), no simulation models,
+- *  no technology schematic, no FPGA view; its reports Vivado's; the board programmed with openFPGALoader (iMPACT's page);
++ *  no technology schematic; its FPGA view implview's export of the routed checkpoint (#implview, server/implview.js); its reports Vivado's; the board programmed with openFPGALoader (iMPACT's page);
+  *  Emulate, the board's emulator on the HDL and the XDC's pins (#3704). The local server's only: the browser edition has NO_FLOW. */
+ export const VIVADO = {
+   id: 'vivado', name: 'AMD Vivado', open: false,
+   steps: withProducts([step('synth', 'Synthesize - Vivado'), step('translate', 'Translate', ['synth']), step('map', 'Map', ['translate']), step('par', 'Place & Route', ['map']),
+-    step('trce', EXTRA_STEPS.trce, ['par']), step('pin2ucf', EXTRA_STEPS.pin2ucf, ['par']), step('xpwr', EXTRA_STEPS.xpwr, ['par']), step('bitgen', 'Generate Programming File', ['par'])], {
++    step('trce', EXTRA_STEPS.trce, ['par']), step('pin2ucf', EXTRA_STEPS.pin2ucf, ['par']), step('xpwr', EXTRA_STEPS.xpwr, ['par']), step('bitgen', 'Generate Programming File', ['par']),
++    step('fpgaview', EXTRA_STEPS.fpgaview, ['par'])], {
+     synth: ['post_synth.dcp', '{top}_synth_util.rpt'], map: ['post_opt.dcp'], par: ['post_route.dcp', '{top}_route.rpt', '{top}_drc.rpt', '{top}_util.rpt'],
+-    trce: ['{top}_timing.rpt'], pin2ucf: ['{top}_io.rpt'], xpwr: ['{top}_power.rpt'], bitgen: ['{top}.bit'],
++    trce: ['{top}_timing.rpt'], pin2ucf: ['{top}_io.rpt'], xpwr: ['{top}_power.rpt'], bitgen: ['{top}.bit'], fpgaview: ['implview/{top}.ivd.gz'],
+   }),
+   reports: [
+     { id: 'synthesis', label: 'Synthesis Utilization Report', step: 'synth', file: '{top}_synth_util.rpt' },
+@@ -321,7 +325,29 @@ export const VIVADO = {
+   constraints: XDC,
+   messages: LOG_MESSAGES,
+   program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit' },
+-  tree: treeOf(['synth-open', 'tech', 'postsynth', 'posttrans', 'postmap', 'postpar', 'fpgaview', 'capture'], { synth: { label: 'Synthesize - Vivado', title: 'AMD Vivado' }, impl: { title: 'AMD Vivado' }, bitgen: { title: 'AMD Vivado' } }),
++  tree: treeOf(['synth-open', 'tech', 'postsynth', 'posttrans', 'postmap', 'postpar', 'capture'], { synth: { label: 'Synthesize - Vivado', title: 'AMD Vivado' }, impl: { title: 'AMD Vivado' }, bitgen: { title: 'AMD Vivado' } }),
++  tasks: LAB_TASKS,
++};
++
++/** The open 7-series flow of the native tools (openXC7, #openxc7, server/openxc7.js): Yosys synth_xilinx, nextpnr-xilinx,
++ *  Project X-Ray's fasm2frames and xc7frames2bit; any 7-series device (the Spartan-7's too); its build in build/openxc7, its
++ *  FPGA view implview's import of nextpnr's result; the local server's only. */
++export const OPENXC7 = {
++  id: 'openxc7', name: 'Open 7-series flow (openXC7)', open: false,
++  steps: withProducts([step('synth', 'Synthesize - Yosys (openXC7)'), step('translate', 'Translate', ['synth']), step('map', 'Map', ['translate']), step('par', 'Place & Route - nextpnr', ['map']),
++    step('trce', EXTRA_STEPS.trce, ['par']), step('bitgen', 'Generate Programming File', ['par']), step('fpgaview', EXTRA_STEPS.fpgaview, ['par'])], {
++    synth: ['openxc7/synth.json', 'openxc7/synth_stat.txt'], par: ['openxc7/routed.json', 'openxc7/routed.fasm', 'openxc7/nextpnr.log'], trce: ['openxc7/nextpnr.log'],
++    bitgen: ['openxc7/{top}.bit', '{top}.bit'], fpgaview: ['openxc7/implview.ivd.gz'],
++  }),
++  reports: [
++    { id: 'synthesis', label: 'Synthesis Report (Yosys)', step: 'synth', file: 'openxc7/synth_stat.txt' },
++    { id: 'par', label: 'Place & Route Report (nextpnr)', step: 'par', file: 'openxc7/nextpnr.log' },
++    { id: 'routed', label: 'Routed Design (FASM)', step: 'par', file: 'openxc7/routed.fasm' },
++  ],
++  constraints: XDC,
++  messages: LOG_MESSAGES,
++  program: { process: 'config', page: 'impact', title: 'iMPACT', target: 'jtag', file: '{top}.bit' },
++  tree: treeOf(['synth-open', 'tech', 'postsynth', 'posttrans', 'postmap', 'postpar', 'pin2ucf', 'xpwr', 'capture'], { synth: { label: 'Synthesize - Yosys (openXC7)', title: 'Open 7-series flow (openXC7)' }, impl: { title: 'Open 7-series flow (openXC7)' }, bitgen: { title: 'Open 7-series flow (openXC7)' } }),
+   tasks: LAB_TASKS,
+ };
+ 
+@@ -332,8 +358,10 @@ const OPEN_BY_FAMILY = { ice40: SILINX_ICE40, artix7: SILINX_XC7, ecp5: SILINX_E
+  *  `open` (the project's synthesis tool Silinx, #3146), and always in the browser edition (`standalone`, #3143), the Artix-7's
+  *  only: a Vivado-only family's (the Spartan-7, the Kintex-7, the Zynq-7000, #3895) none there; another experimental family's
+  *  none yet; `open`, the Silinx toolchain (its back end by the family), else ISE; a design and simulation project's
+- *  (`designOnly`, #3780) DESIGN_ONLY whatever its device. */
+-export const toolOf = (device, open, { standalone = false, designOnly = false } = {}) => (designOnly ? DESIGN_ONLY
++ *  (`designOnly`, #3780) DESIGN_ONLY whatever its device; a 7-series one's with `openxc7` (the project's synthesis tool openXC7,
++ *  #openxc7) on the local server OPENXC7. */
++export const toolOf = (device, open, { standalone = false, designOnly = false, openxc7 = false } = {}) => (designOnly ? DESIGN_ONLY
++  : vivadoDevice(device) && openxc7 && !standalone ? OPENXC7
+   : vivadoDevice(device) ? (!openFlowDevice(device) ? (standalone ? NO_FLOW : VIVADO) : open || standalone ? SILINX_XC7 : VIVADO)
+   : experimentalDevice(device) ? NO_FLOW : open ? OPEN_BY_FAMILY[deviceFamily(device)] || SILINX : ISE);
+ 
+-- 
+2.43.0
+
